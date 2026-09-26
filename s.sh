@@ -19,7 +19,8 @@
 # ============================================================================
 set -euo pipefail
 
-APP_DIR="$HOME/crypto-signal-bot"
+# Жёстко заданный путь — независимо от того, кто запускает скрипт
+APP_DIR="/home/trader/crypto-signal-bot"
 REPO_URL="https://github.com/Matveyft/crypto-signal-bot.git"
 TS=$(date +%H:%M:%S)
 
@@ -82,8 +83,10 @@ ufw allow OpenSSH >/dev/null 2>&1 || true
 echo "y" | ufw enable >/dev/null 2>&1 || true
 
 say "6/8 Код и базы данных"
-sudo -u trader git clone -q "$REPO_URL" "$APP_DIR" 2>/dev/null || \
-    sudo -u trader git -C "$APP_DIR" pull -q
+# Клонируем от root (права есть всегда), затем отдаём владельцу trader
+git clone -q "$REPO_URL" "$APP_DIR" 2>/dev/null || git -C "$APP_DIR" pull -q
+chown -R trader:trader "$APP_DIR"
+sudo -u trader mkdir -p "$APP_DIR/logs"
 cd "$APP_DIR"
 
 # .env: генерируем новый пароль БД, если ещё нет
@@ -91,7 +94,10 @@ if [ ! -f .env ]; then
     DB_PASS="$(openssl rand -hex 12)"
     sed -e "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=${DB_PASS}/" .env.example > .env
     chown trader:trader .env
-    echo "Создан .env со свежим паролем БД."
+    # Контейнер БД помнит старый пароль из volume — сбрасываем volume,
+    # история загрузится заново (load_historical ниже)
+    docker compose down -v >/dev/null 2>&1 || true
+    echo "Создан .env со свежим паролем БД (БД пересоздана с нуля)."
 fi
 
 docker compose up -d
@@ -149,11 +155,9 @@ systemctl enable --now csb-collector
 # Стратегия стартует с задержкой 60 сек после коллектора (таймером разового запуска)
 systemctl enable --now csb-strategy || true
 
-say "Загрузка 30 дней истории (фон, ~30 мин) — не закрывайте влияние: она идёт сама"
+say "Загрузка 30 дней истории (фон, ~30 мин)"
 sudo -u trader nohup "$APP_DIR/.venv/bin/python" -m scripts.load_historical \
     > "$APP_DIR/logs/load_historical.log" 2>&1 &
-mkdir -p "$APP_DIR/logs" 2>/dev/null || true
-sudo -u trader mkdir -p "$APP_DIR/logs"
 
 echo ""
 echo "=============================================================="
