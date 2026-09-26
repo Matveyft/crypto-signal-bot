@@ -1,0 +1,17 @@
+# Core runtime
+python-dotenv==1.0.1
+PyYAML==6.0.2
+ccxt==4.5.84
+websockets==13.1
+SQLAlchemy[asyncio]==2.1.1
+asyncpg==0.31.0
+redis==5.2.1
+
+# Data / math (indicators are implemented natively on pandas/numpy)
+pandas==3.0.2
+numpy==2.4.4
+scipy>=1.14
+
+# Dev / tests
+pytest==8.3.4
+pytest-asyncio==0.25.0

@@ -1,0 +1,241 @@
+"""Главный раннер: скан символов -> сигналы -> БД -> отслеживание позиций.
+
+Запуск: python -m scripts.run_strategy
+"""
+
+from __future__ import annotations
+
+import asyncio
+import signal as sig_module
+from datetime import datetime, timezone
+from typing import Any
+
+from sqlalchemy import text
+
+from data_layer.storage.redis_cache import RedisCache
+from data_layer.storage.timescale_manager import TimescaleManager
+from data_layer.utils import load_config, setup_logging
+from strategy.signal_generator import SignalGenerator
+
+logger = setup_logging("run_strategy")
+
+ACCOUNT_BALANCE = 5_000.0  # USDT; подключить реальный баланс при execution layer
+
+
+class StrategyRunner:
+    """Оркестратор цикла сканирования и менеджмента виртуальных позиций."""
+
+    def __init__(self, account_balance: float = ACCOUNT_BALANCE) -> None:
+        """Инициализирует раннер.
+
+        Args:
+            account_balance: Размер аккаунта для расчёта позиций.
+        """
+        self.cfg = load_config("symbols")
+        self.params = load_config("strategy_params")
+        self._db = TimescaleManager()
+        self._cache = RedisCache()
+        self.generator = SignalGenerator(self._db, self._cache, self.params)
+        self.account_balance = account_balance
+        self.scan_interval = self.params.get("signal", {}).get("scan_interval_sec", 60)
+        self.min_confidence = self.params.get("signal", {}).get("min_confidence", 0.6)
+        self._running = True
+
+    # ------------------------------------------------------------------ main
+    async def run(self) -> None:
+        """Бесконечный цикл: скан -> сигналы -> трекинг позиций."""
+        loop = asyncio.get_running_loop()
+        for sig in (sig_module.SIGINT, sig_module.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, self._shutdown)
+            except NotImplementedError:  # Windows
+                sig_module.signal(sig, lambda *_: self._shutdown())
+        logger.info("Strategy runner started (scan every %ds)", self.scan_interval)
+        try:
+            while self._running:
+                try:
+                    await self.scan_all()
+                    await self.track_positions()
+                except Exception:
+                    logger.exception("Scan cycle failed")
+                await self._sleep(self.scan_interval)
+        finally:
+            await self._cache.close()
+            await self._db.close()
+            logger.info("Strategy runner stopped")
+
+    def _shutdown(self) -> None:
+        """Graceful shutdown флаг."""
+        self._running = False
+        logger.info("Shutdown requested")
+
+    async def _sleep(self, seconds: float) -> None:
+        """Сон с возможностью раннего выхода при shutdown."""
+        for _ in range(int(seconds)):
+            if not self._running:
+                return
+            await asyncio.sleep(1)
+
+    # ----------------------------------------------------------------- scan
+    async def scan_all(self) -> None:
+        """Сканирует все символы, сохраняет сигналы, шлёт уведомления."""
+        for symbol in self.cfg["symbols"]:
+            if not self._running:
+                break
+            if self.generator.in_cooldown(symbol):
+                continue
+            signal = await self.generator.generate_signals(symbol)
+            if signal is None or signal["confidence"] < self.min_confidence:
+                continue
+            self.generator.mark_signaled(symbol)
+            signal["position_size"] = self.generator.risk.calculate_position_size(
+                account_balance=self.account_balance,
+                entry_price=signal["entry"],
+                stop_loss=signal["stop"],
+            )
+            await self._save_signal(signal)
+            self._notify(signal)
+
+    async def _save_signal(self, signal: dict[str, Any]) -> None:
+        """Сохраняет сигнал в таблицу signals и открывает виртуальную позицию.
+
+        Args:
+            signal: Сигнал от SignalGenerator.
+        """
+        query = text(
+            "INSERT INTO signals (symbol, strategy, side, entry, stop, target1,"
+            " target2, confidence, reason) VALUES"
+            " (:symbol, :strategy, :side, :entry, :stop, :t1, :t2, :confidence, :reason)"
+            " RETURNING id"
+        )
+        async with self._db.engine.begin() as conn:
+            result = await conn.execute(query, {
+                "symbol": signal["symbol"], "strategy": signal["strategy"],
+                "side": signal["type"], "entry": signal["entry"],
+                "stop": signal["stop"], "t1": signal["targets"][0],
+                "t2": signal["targets"][1] if len(signal["targets"]) > 1 else None,
+                "confidence": signal["confidence"], "reason": signal["reason"][:500],
+            })
+            signal_id = result.scalar_one()
+            await conn.execute(text(
+                "INSERT INTO positions (signal_id, symbol, side, entry, stop,"
+                " target, size) VALUES (:sid, :symbol, :side, :entry, :stop,"
+                " :target, :size)"
+            ), {
+                "sid": signal_id, "symbol": signal["symbol"], "side": signal["type"],
+                "entry": signal["entry"], "stop": signal["stop"],
+                "target": signal["targets"][-1],
+                "size": signal["position_size"]["qty"],
+            })
+
+    def _notify(self, signal: dict[str, Any]) -> None:
+        """Уведомление о сигнале (пока print; сюда встраивается Telegram/webhook).
+
+        Args:
+            signal: Сигнал.
+        """
+        size = signal["position_size"]
+        print("=" * 70)
+        print(f"СИГНАЛ {signal['type']} | {signal['symbol']} | {signal['strategy']}"
+              f" | confidence={signal['confidence']:.2f}")
+        print(f"entry={signal['entry']:.6g} stop={signal['stop']:.6g} "
+              f"targets={[round(t, 6) for t in signal['targets']]}")
+        print(f"size={size['qty']:.6g} (risk ${size['risk_amount']}, "
+              f"margin ${size['margin_usdt']})")
+        print(f"reason: {signal['reason']}")
+        print("=" * 70)
+        logger.info("Signal saved: %s %s %s conf=%.2f", signal["symbol"],
+                    signal["type"], signal["strategy"], signal["confidence"])
+
+    # --------------------------------------------------------------- tracking
+    async def track_positions(self) -> None:
+        """Проверяет открытые позиции: стоп/тейк/трейлинг."""
+        async with self._db.engine.begin() as conn:
+            rows = (await conn.execute(text(
+                "SELECT id, symbol, side, entry, stop, target, trailing_active"
+                " FROM positions WHERE status = 'open'"
+            ))).mappings().all()
+
+        for pos in rows:
+            price = await self._get_last_price(pos["symbol"])
+            if price is None:
+                continue
+            await self._check_position(dict(pos), price)
+
+    async def _get_last_price(self, symbol: str) -> float | None:
+        """Последняя цена: из Redis (текущая свеча) или БД (закрытая).
+
+        Args:
+            symbol: Символ ccxt.
+
+        Returns:
+            Цена close или None.
+        """
+        candle = await self._cache.get_candle(symbol, "1m")
+        if candle is not None:
+            return float(candle["close"])
+        df = await self._db.fetch_ohlcv(symbol, "1m", limit=1)
+        if df.empty:
+            return None
+        return float(df["close"].iloc[-1])
+
+    async def _check_position(self, pos: dict[str, Any], price: float) -> None:
+        """Применяет правила выхода к одной позиции.
+
+        Args:
+            pos: Строка позиции (id, side, entry, stop, target, trailing_active).
+            price: Текущая цена.
+        """
+        is_long = pos["side"] == "LONG"
+        exit_price: float | None = None
+        status = ""
+
+        if is_long:
+            if price <= pos["stop"]:
+                exit_price, status = price, "stopped"
+            elif price >= pos["target"]:
+                exit_price, status = price, "target"
+        else:
+            if price >= pos["stop"]:
+                exit_price, status = price, "stopped"
+            elif price <= pos["target"]:
+                exit_price, status = price, "target"
+
+        if exit_price is not None:
+            pnl_pct = (exit_price - pos["entry"]) / pos["entry"] * 100
+            if not is_long:
+                pnl_pct = -pnl_pct
+            async with self._db.engine.begin() as conn:
+                await conn.execute(text(
+                    "UPDATE positions SET status = :status, closed_at = :now,"
+                    " exit_price = :exit, pnl_pct = :pnl WHERE id = :id"
+                ), {"status": status, "now": datetime.now(tz=timezone.utc),
+                    "exit": exit_price, "pnl": pnl_pct, "id": pos["id"]})
+            logger.info("Position %s %s closed: %s @ %.6g (pnl %.2f%%)",
+                        pos["id"], pos["symbol"], status, exit_price, pnl_pct)
+            return
+
+        # Trailing: при 1:1 переносим стоп в безубыток
+        if not pos["trailing_active"]:
+            activate = self.generator.risk.should_trail_stop(
+                price, pos["entry"], pos["stop"]
+            )
+            if activate:
+                breakeven = pos["entry"]
+                async with self._db.engine.begin() as conn:
+                    await conn.execute(text(
+                        "UPDATE positions SET trailing_active = TRUE,"
+                        " stop = :stop WHERE id = :id"
+                    ), {"stop": breakeven, "id": pos["id"]})
+                logger.info("Position %s %s: trailing activated, stop -> breakeven %.6g",
+                            pos["id"], pos["symbol"], breakeven)
+
+
+async def main() -> None:
+    """Точка входа."""
+    runner = StrategyRunner()
+    await runner.run()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

@@ -1,0 +1,23 @@
+# Параметры подключения. Значения из .env имеют приоритет над этим файлом.
+timescaledb:
+  host: ${POSTGRES_HOST}
+  port: ${POSTGRES_PORT}
+  user: ${POSTGRES_USER}
+  password: ${POSTGRES_PASSWORD}
+  db: ${POSTGRES_DB}
+  pool_size: 10
+  max_overflow: 5
+  echo: false
+
+redis:
+  host: ${REDIS_HOST}
+  port: ${REDIS_PORT}
+  db: ${REDIS_DB}
+
+hypertables:
+  ohlcv:
+    chunk_time_interval: "7 days"
+    retention: null        # например "365 days"; null = храним вечно
+  funding_data:
+    chunk_time_interval: "30 days"
+    retention: null

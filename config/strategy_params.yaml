@@ -1,0 +1,49 @@
+filters:
+  min_volatility_pct: 0.5          # ATR/price за последний час, %
+  min_volume_ratio: 1.0            # volume / MA20(volume)
+  max_funding_rate: 0.001          # |funding| < 0.1%
+  excluded_hours_utc: [3, 4, 5, 6, 7]
+  trend_timeframes: ["1d", "4h"]
+
+trend_pullback:
+  d1_adx_min: 25
+  h1_rsi_min: 40
+  m15_lookback_bars: 4
+  orderbook_imbalance_min: 1.8
+  cvd_window_minutes: 30
+  fib_pullback_zone: [0.382, 0.5]
+
+mean_reversion:
+  h1_rsi_max: 30
+  h1_rsi_min: 70                   # для SHORT: RSI > 70
+  h1_stoch_rsi_max: 20
+  h1_stoch_rsi_min: 80             # для SHORT
+  m15_volume_spike_ratio: 1.5
+  funding_rate_max: 0
+  max_dist_from_ema200_pct: 10     # не входим против сильного тренда
+
+breakout:
+  h4_bb_width_ratio: 0.5           # BB width < 50% от 20-дневного среднего
+  h4_min_touches: 5
+  h1_volume_spike_ratio: 2.0
+  h1_oi_change_min_pct: 5
+  m15_orderbook_imbalance_min: 2.0
+
+risk_management:
+  risk_per_trade_pct: 0.5          # % от баланса на сделку (депозит 5000 USDT)
+  stop_loss_atr_multiplier: 1.5
+  risk_reward_ratio: 2.0
+  trailing_stop_activation_rr: 1.0
+  leverage: 5
+
+signal:
+  scan_interval_sec: 60
+  min_confidence: 0.6
+  cooldown_minutes: 60             # не сигналим тот же символ чаще, чем раз в N минут
+
+levels:
+  swing_order: 5
+  cluster_tolerance_pct: 0.3
+  touch_tolerance_pct: 0.5
+  min_touches: 2
+  volume_profile_bins: 50

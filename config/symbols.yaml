@@ -1,0 +1,21 @@
+# Торгуемые пары — USDT perpetual futures на Bybit.
+# MATICUSDT делистинг на Bybit — вместо него POL (миграция 1:1).
+symbols:
+  - BTC/USDT:USDT
+  - ETH/USDT:USDT
+  - BNB/USDT:USDT
+  - XRP/USDT:USDT
+  - ADA/USDT:USDT
+  - SOL/USDT:USDT
+  - DOGE/USDT:USDT
+  - DOT/USDT:USDT
+  - POL/USDT:USDT
+  - AVAX/USDT:USDT
+
+timeframes:
+  base: "1m"          # собирается с WebSocket
+  aggregated: ["5m", "15m", "1h", "4h", "1d"]
+
+historical:
+  days_back: 30
+  candles_per_request: 1000
