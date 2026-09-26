@@ -27,11 +27,22 @@ say() { echo -e "\n[$(date +%H:%M:%S)] ====== $* ======"; }
 
 say "1/8 Обновление системы"
 export DEBIAN_FRONTEND=noninteractive
+# Лечим незавершённые установки в образе ОС (частая причина dpkg error 1)
+dpkg --configure -a || true
 apt-get update -qq
-apt-get upgrade -y -qq
+apt-get -f install -y -qq || true
+apt-get upgrade -y -qq || true
 
 say "2/8 Установка Docker, git, Python"
-apt-get install -y -qq docker.io docker-compose-v2 git python3-venv python3-pip ufw openssl >/dev/null
+apt-get install -y -qq docker.io git python3-venv python3-pip ufw openssl >/dev/null
+# compose-плагин: имя пакета зависит от образа Ubuntu — пробуем варианты
+apt-get install -y -qq docker-compose-v2 2>/dev/null \
+    || apt-get install -y -qq docker-compose-plugin 2>/dev/null \
+    || true
+if ! docker compose version >/dev/null 2>&1; then
+    echo "ОШИБКА: docker compose не установлен" >&2
+    exit 1
+fi
 
 say "3/8 Пользователь trader"
 if ! id trader &>/dev/null; then
