@@ -121,6 +121,13 @@ class SignalGenerator:
                 entry_price=best["entry"],
                 stop_loss=best["stop"],
             )
+            # Лимитный вход (maker): чуть лучше текущей цены в сторону сделки
+            sig_cfg = self.params.get("signal", {})
+            offset = float(sig_cfg.get("limit_offset_pct", 0.15)) / 100
+            if best["type"] == "LONG":
+                best["limit_price"] = round(best["entry"] * (1 - offset), 8)
+            else:
+                best["limit_price"] = round(best["entry"] * (1 + offset), 8)
             self.logger.info("SIGNAL %s %s %s conf=%.2f (%.0f ms): %s",
                              symbol, best["type"], best["strategy"],
                              best["confidence"], (time.time() - started) * 1000,

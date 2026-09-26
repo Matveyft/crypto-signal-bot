@@ -15,6 +15,7 @@ from sqlalchemy import text
 from data_layer.storage.redis_cache import RedisCache
 from data_layer.storage.timescale_manager import TimescaleManager
 from data_layer.utils import load_config, setup_logging
+from notifications.telegram_notifier import TelegramNotifier
 from strategy.signal_generator import SignalGenerator
 
 logger = setup_logging("run_strategy")
@@ -36,9 +37,11 @@ class StrategyRunner:
         self._db = TimescaleManager()
         self._cache = RedisCache()
         self.generator = SignalGenerator(self._db, self._cache, self.params)
+        self.notifier = TelegramNotifier(self._db)
         self.account_balance = account_balance
         self.scan_interval = self.params.get("signal", {}).get("scan_interval_sec", 60)
         self.min_confidence = self.params.get("signal", {}).get("min_confidence", 0.6)
+        self.limit_ttl = self.params.get("signal", {}).get("limit_ttl_minutes", 30)
         self._running = True
 
     # ------------------------------------------------------------------ main
@@ -51,6 +54,7 @@ class StrategyRunner:
             except NotImplementedError:  # Windows
                 sig_module.signal(sig, lambda *_: self._shutdown())
         logger.info("Strategy runner started (scan every %ds)", self.scan_interval)
+        polling = asyncio.create_task(self.notifier.poll_loop())
         try:
             while self._running:
                 try:
@@ -60,6 +64,8 @@ class StrategyRunner:
                     logger.exception("Scan cycle failed")
                 await self._sleep(self.scan_interval)
         finally:
+            polling.cancel()
+            await self.notifier.close()
             await self._cache.close()
             await self._db.close()
             logger.info("Strategy runner stopped")
@@ -97,11 +103,12 @@ class StrategyRunner:
             self._notify(signal)
 
     async def _save_signal(self, signal: dict[str, Any]) -> None:
-        """Сохраняет сигнал в таблицу signals и открывает виртуальную позицию.
+        """Сохраняет сигнал и создаёт позицию в статусе pending (ждёт лимитку).
 
         Args:
             signal: Сигнал от SignalGenerator.
         """
+        limit = signal.get("limit_price") or signal["entry"]
         query = text(
             "INSERT INTO signals (symbol, strategy, side, entry, stop, target1,"
             " target2, confidence, reason) VALUES"
@@ -118,12 +125,14 @@ class StrategyRunner:
             })
             signal_id = result.scalar_one()
             await conn.execute(text(
-                "INSERT INTO positions (signal_id, symbol, side, entry, stop,"
-                " target, size) VALUES (:sid, :symbol, :side, :entry, :stop,"
-                " :target, :size)"
+                "INSERT INTO positions (signal_id, symbol, side, limit_price,"
+                " entry, stop, target, size, status) VALUES"
+                " (:sid, :symbol, :side, :limit, :entry, :stop,"
+                " :target, :size, 'pending')"
             ), {
                 "sid": signal_id, "symbol": signal["symbol"], "side": signal["type"],
-                "entry": signal["entry"], "stop": signal["stop"],
+                "limit": limit, "entry": limit,
+                "stop": signal["stop"],
                 "target": signal["targets"][-1],
                 "size": signal["position_size"]["qty"],
             })
@@ -138,29 +147,71 @@ class StrategyRunner:
         print("=" * 70)
         print(f"СИГНАЛ {signal['type']} | {signal['symbol']} | {signal['strategy']}"
               f" | confidence={signal['confidence']:.2f}")
-        print(f"entry={signal['entry']:.6g} stop={signal['stop']:.6g} "
+        print(f"лимит={signal.get('limit_price', signal['entry']):.6g} "
+              f"stop={signal['stop']:.6g} "
               f"targets={[round(t, 6) for t in signal['targets']]}")
         print(f"size={size['qty']:.6g} (risk ${size['risk_amount']}, "
               f"margin ${size['margin_usdt']})")
         print(f"reason: {signal['reason']}")
         print("=" * 70)
+        html = self.notifier.format_signal(signal)
+        asyncio.ensure_future(self.notifier.send_channel(html))
+        asyncio.ensure_future(self.notifier.send_admin(html))
         logger.info("Signal saved: %s %s %s conf=%.2f", signal["symbol"],
                     signal["type"], signal["strategy"], signal["confidence"])
 
     # --------------------------------------------------------------- tracking
     async def track_positions(self) -> None:
-        """Проверяет открытые позиции: стоп/тейк/трейлинг."""
+        """Проверяет позиции: исполнение лимиток, стоп/тейк/трейлинг."""
         async with self._db.engine.begin() as conn:
             rows = (await conn.execute(text(
-                "SELECT id, symbol, side, entry, stop, target, trailing_active"
-                " FROM positions WHERE status = 'open'"
+                "SELECT id, symbol, side, entry, stop, target, limit_price,"
+                " status, trailing_active, opened_at"
+                " FROM positions WHERE status IN ('open', 'pending')"
             ))).mappings().all()
 
         for pos in rows:
             price = await self._get_last_price(pos["symbol"])
             if price is None:
                 continue
-            await self._check_position(dict(pos), price)
+            if pos["status"] == "pending":
+                await self._check_pending(dict(pos), price)
+            else:
+                await self._check_position(dict(pos), price)
+
+    async def _check_pending(self, pos: dict[str, Any], price: float) -> None:
+        """Pending-позиция: ждём касания лимитки или отменяем по таймауту.
+
+        Args:
+            pos: Строка позиции со статусом pending.
+            price: Текущая live-цена.
+        """
+        limit = pos["limit_price"] or pos["entry"]
+        now = datetime.now(tz=timezone.utc)
+        age_min = (now - pos["opened_at"]).total_seconds() / 60
+
+        filled = (pos["side"] == "LONG" and price <= limit) or \
+                 (pos["side"] == "SHORT" and price >= limit)
+        if filled:
+            async with self._db.engine.begin() as conn:
+                await conn.execute(text(
+                    "UPDATE positions SET status = 'open', entry = :entry"
+                    " WHERE id = :id"
+                ), {"entry": limit, "id": pos["id"]})
+            pos["entry"] = limit
+            logger.info("Pending %s %s: filled at %.6g", pos["symbol"],
+                        pos["side"], limit)
+            asyncio.ensure_future(self.notifier.send_channel(
+                self.notifier.format_lifecycle(pos, "filled")))
+        elif age_min > self.limit_ttl:
+            async with self._db.engine.begin() as conn:
+                await conn.execute(text(
+                    "UPDATE positions SET status = 'cancelled',"
+                    " closed_at = :now WHERE id = :id"
+                ), {"now": now, "id": pos["id"]})
+            logger.info("Pending %s %s: cancelled (TTL)", pos["symbol"], pos["side"])
+            asyncio.ensure_future(self.notifier.send_channel(
+                self.notifier.format_lifecycle(pos, "cancelled")))
 
     async def _get_last_price(self, symbol: str) -> float | None:
         """Последняя цена: из Redis (текущая свеча) или БД (закрытая).
@@ -213,6 +264,11 @@ class StrategyRunner:
                     "exit": exit_price, "pnl": pnl_pct, "id": pos["id"]})
             logger.info("Position %s %s closed: %s @ %.6g (pnl %.2f%%)",
                         pos["id"], pos["symbol"], status, exit_price, pnl_pct)
+            pos["exit_price"] = exit_price
+            pos["pnl_pct"] = pnl_pct
+            event = "tp" if status == "target" else "sl"
+            asyncio.ensure_future(self.notifier.send_channel(
+                self.notifier.format_lifecycle(pos, event)))
             return
 
         # Trailing: при 1:1 переносим стоп в безубыток
@@ -229,6 +285,8 @@ class StrategyRunner:
                     ), {"stop": breakeven, "id": pos["id"]})
                 logger.info("Position %s %s: trailing activated, stop -> breakeven %.6g",
                             pos["id"], pos["symbol"], breakeven)
+                asyncio.ensure_future(self.notifier.send_channel(
+                    self.notifier.format_lifecycle(pos, "breakeven")))
 
 
 async def main() -> None:

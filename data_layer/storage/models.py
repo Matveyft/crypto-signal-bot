@@ -101,6 +101,7 @@ class Position(Base):
     signal_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     symbol: Mapped[str] = mapped_column(String(30), nullable=False)
     side: Mapped[str] = mapped_column(String(5), nullable=False)
+    limit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     entry: Mapped[float] = mapped_column(Float, nullable=False)
     stop: Mapped[float] = mapped_column(Float, nullable=False)
     target: Mapped[float] = mapped_column(Float, nullable=False)
