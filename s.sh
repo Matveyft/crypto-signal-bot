@@ -25,20 +25,30 @@ TS=$(date +%H:%M:%S)
 
 say() { echo -e "\n[$(date +%H:%M:%S)] ====== $* ======"; }
 
-say "1/8 Обновление системы"
+say "1/8 Восстановление репозиториев и обновление системы"
 export DEBIAN_FRONTEND=noninteractive
+# Образы хостеров часто с обрезанными sources — восстанавливаем полные
+cat > /etc/apt/sources.list.d/ubuntu.sources <<'EOF'
+Types: deb
+URIs: http://archive.ubuntu.com/ubuntu/
+Suites: noble noble-updates noble-security
+Components: main universe restricted multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+EOF
 # Лечим незавершённые установки в образе ОС (частая причина dpkg error 1)
 dpkg --configure -a || true
 apt-get update -qq
 apt-get -f install -y -qq || true
 apt-get upgrade -y -qq || true
 
-say "2/8 Установка Docker, git, Python"
-apt-get install -y -qq docker.io git python3-venv python3-pip ufw openssl >/dev/null
-# compose-плагин: имя пакета зависит от образа Ubuntu — пробуем варианты
-apt-get install -y -qq docker-compose-v2 2>/dev/null \
-    || apt-get install -y -qq docker-compose-plugin 2>/dev/null \
-    || true
+say "2/8 Установка Docker (официальный репозиторий), git, Python"
+apt-get install -y -qq ca-certificates curl gnupg git python3-venv python3-pip ufw openssl >/dev/null
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list
+apt-get update -qq
+apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin >/dev/null
 if ! docker compose version >/dev/null 2>&1; then
     echo "ОШИБКА: docker compose не установлен" >&2
     exit 1
