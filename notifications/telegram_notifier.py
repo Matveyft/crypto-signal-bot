@@ -306,6 +306,8 @@ class TelegramNotifier:
             cvd = s["cvd30"]
             imb_s = f"{imb:.1f}" if imb is not None else "—"
             cvd_s = ("+" if cvd and cvd > 0 else "−") if cvd is not None else "—"
+            age = s.get("book_age")
+            age_s = f"{age:.0f}s" if age is not None else "—"
             # Полный набор пре-условий LONG-сетапа (тренд+ADX+фильтры+поток)
             if (s["trend"] == "uptrend" and s["adx"] > 25 and s["vol_ok"]
                     and s["time_ok"] and imb is not None and imb >= 1.8
@@ -317,14 +319,15 @@ class TelegramNotifier:
             lines.append(
                 f"{mark}{symbol.split('/')[0]:6}{s['price']:<9.6g}{tr} "
                 f"ADX{s['adx']:<3.0f}RSI{s['rsi']:<3.0f}"
-                f"vol{vol} imb{imb_s:<5}cvd{cvd_s}"
+                f"vol{vol} imb{imb_s:<5}cvd{cvd_s} {age_s}"
             )
         lines.append("</pre>")
         lines.append(
             f"Пре-условия сетапа выполняются у {ready} из {len(scans)} монет"
             f" (нужен ещё откат к уровню + свечное подтверждение M15)"
         )
-        lines.append("⬤ ▲ тренд вверх ▼ вниз ■ боковик ⚡ поток подтверждён")
+        lines.append("⬤ ▲ тренд вверх ▼ вниз ■ боковик ⚡ поток подтверждён "
+                     "· aN — возраст стакана, imb— — стакан деградирован")
         return "\n".join(lines)
 
     async def _build_stats(self) -> str:

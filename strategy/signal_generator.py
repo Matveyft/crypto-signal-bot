@@ -175,6 +175,7 @@ class SignalGenerator:
             "vol_ok": vol_ok, "time_ok": time_ok,
             "imb": flow.get("imbalance"), "cvd30": flow.get("cvd_30m"),
             "funding": funding_rate,
+            "book_age": flow.get("snapshot_age_sec"),
         }
         # Дальше — только лог в INFO с троттлингом раз в 15 минут
         if now - self._last_scan_log.get(symbol, 0) < self._scan_log_interval:

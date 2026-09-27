@@ -9,6 +9,12 @@ from typing import Any
 
 from data_layer.storage.redis_cache import RedisCache
 
+# Sanity-границы imbalance топ-10: настоящие книги ликвидных перпов не выходят
+# за ~5-20x. Значение вне диапазона — признак деградировавшего снапшота
+# (рассинхрон WS snapshot/diff, почти пустая сторона стакана), а не рынка.
+IMBALANCE_SANITY_MIN = 0.05
+IMBALANCE_SANITY_MAX = 20.0
+
 
 class OrderbookAnalyzer:
     """Анализ стакана и CVD по данным из Redis."""
@@ -25,23 +31,38 @@ class OrderbookAnalyzer:
 
     @staticmethod
     def calculate_imbalance(
-        bids: list[list[float]], asks: list[list[float]], depth: int = 10
+        bids: list[list[float]],
+        asks: list[list[float]],
+        depth: int = 10,
+        min_levels: int | None = None,
     ) -> float | None:
         """Считает дисбаланс стакана: bid volume / ask volume в топ-N уровнях.
+
+        Деградировавший снапшот отклоняется (None): меньше min_levels уровней
+        с любой из сторон, нулевой объём или значение вне sanity-границ.
+        По такому стакану сигнал не формируется — ждём свежий snapshot.
 
         Args:
             bids: [[price, size], ...] по убыванию цены.
             asks: [[price, size], ...] по возрастанию цены.
             depth: Глубина учёта (уровней с каждой стороны).
+            min_levels: Минимум уровней с каждой стороны (None — = depth).
 
         Returns:
-            Имбаланс (>1 — давление покупателей) или None при пустом стакане.
+            Имбаланс (>1 — давление покупателей) или None, если стакан
+            пуст или деградировал.
         """
+        min_lv = depth if min_levels is None else min_levels
+        if len(bids) < min_lv or len(asks) < min_lv:
+            return None
         bid_vol = sum(size for _, size in bids[:depth])
         ask_vol = sum(size for _, size in asks[:depth])
         if ask_vol <= 0 or bid_vol <= 0:
             return None
-        return bid_vol / ask_vol
+        ratio = bid_vol / ask_vol
+        if not (IMBALANCE_SANITY_MIN <= ratio <= IMBALANCE_SANITY_MAX):
+            return None
+        return ratio
 
     def detect_walls(
         self,
@@ -107,11 +128,18 @@ class OrderbookAnalyzer:
         bids = data.get("bids", [])
         asks = data.get("asks", [])
         imbalance = self.calculate_imbalance(bids, asks, depth=10)
+        if imbalance is None:
+            # Fallback на посчитанный коллектором imb — только если он сам
+            # проходит sanity-границы (мусор из битого снапшота не пробрасываем)
+            stored = data.get("imbalance")
+            if (stored is not None
+                    and IMBALANCE_SANITY_MIN <= float(stored) <= IMBALANCE_SANITY_MAX):
+                imbalance = float(stored)
         walls = self.detect_walls(bids, asks)
         return {
             "bids": bids,
             "asks": asks,
-            "imbalance": imbalance if imbalance is not None else data.get("imbalance"),
+            "imbalance": imbalance,
             "bid_walls": walls["bid_walls"],
             "ask_walls": walls["ask_walls"],
             "updated_at": data.get("updated_at"),

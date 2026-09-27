@@ -73,6 +73,8 @@ class BybitCollector(BaseCollector):
         }
         # Стакан в памяти: {symbol: {'b': [...], 'a': [...]}}
         self._books: dict[str, dict[str, list[list[str]]]] = {}
+        # Счётчики подряд деградировавших стаканов (троттлинг warning'ов)
+        self._degraded_books: dict[str, int] = {}
 
     async def _run(self) -> None:
         """Основной цикл: connect -> subscribe -> receive loop."""
@@ -195,6 +197,11 @@ class BybitCollector(BaseCollector):
     async def _handle_orderbook(self, msg: dict[str, Any]) -> None:
         """Обновляет стакан, считает imbalance и стены, пушит в Redis.
 
+        Деградировавший стакан (<10 уровней с любой стороны — рассинхрон
+        snapshot/diff после реконнекта) не пушится: свежий snapshot биржа
+        присылает при следующем переподключении, до него imb считается
+        отсутствующим, а не мусорным.
+
         Args:
             msg: Распарсенное сообщение orderbook.50.
         """
@@ -218,15 +225,25 @@ class BybitCollector(BaseCollector):
 
         bids = [(float(p), float(s)) for p, s in book["b"][:50]]
         asks = [(float(p), float(s)) for p, s in book["a"][:50]]
+        if len(bids) < 10 or len(asks) < 10:
+            count = self._degraded_books.get(ccxt_sym, 0) + 1
+            self._degraded_books[ccxt_sym] = count
+            if count == 1 or count % 100 == 0:
+                self.logger.warning(
+                    "Orderbook degraded for %s (%d updates in row): "
+                    "%d bid / %d ask levels, waiting for fresh snapshot",
+                    ccxt_sym, count, len(bids), len(asks))
+            return
+        self._degraded_books[ccxt_sym] = 0
         bid_vol = sum(s for _, s in bids[:10])
         ask_vol = sum(s for _, s in asks[:10])
-        imbalance = bid_vol / ask_vol if ask_vol > 0 else float("inf")
+        imbalance = bid_vol / ask_vol if ask_vol > 0 and bid_vol > 0 else None
         await self._cache.set_orderbook(ccxt_sym, {
             "bids": bids[:20],
             "asks": asks[:20],
             "bid_volume_top10": bid_vol,
             "ask_volume_top10": ask_vol,
-            "imbalance": round(imbalance, 4) if imbalance != float("inf") else 99.0,
+            "imbalance": round(imbalance, 4) if imbalance is not None else None,
             "updated_at": time.time(),
         })
 

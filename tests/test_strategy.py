@@ -11,13 +11,23 @@ from strategy.risk_manager import RiskManager
 
 # ------------------------------------------------------ OrderbookAnalyzer tests
 class FakeRedisCache:
-    """Мок RedisCache: отдаёт заранее заданный CVD-снапшот."""
+    """Мок RedisCache: отдаёт CVD и стакан, пишет set_orderbook в список."""
 
-    def __init__(self, cvd_data: dict | None) -> None:
+    def __init__(
+        self, cvd_data: dict | None, orderbook: dict | None = None
+    ) -> None:
         self._cvd = cvd_data
+        self._orderbook = orderbook
+        self.orderbook_pushes: list[tuple[str, dict]] = []
 
     async def get_cvd(self, symbol: str) -> dict | None:
         return self._cvd
+
+    async def get_orderbook(self, symbol: str) -> dict | None:
+        return self._orderbook
+
+    async def set_orderbook(self, symbol: str, snapshot: dict) -> None:
+        self.orderbook_pushes.append((symbol, snapshot))
 
 
 class TestOrderbookAnalyzer:
@@ -48,6 +58,121 @@ class TestOrderbookAnalyzer:
         analyzer = OrderbookAnalyzer(FakeRedisCache({"total": 1.0}))
         with pytest.raises(ValueError):
             await analyzer.calculate_cvd("BTC/USDT:USDT", "7min")
+
+
+class TestImbalanceGuard:
+    """Guard от деградировавших снапшотов стакана в calculate_imbalance."""
+
+    @staticmethod
+    def _book(n_bids: int = 10, n_asks: int = 10,
+              bid_sz: float = 5.0, ask_sz: float = 5.0
+              ) -> tuple[list[list[float]], list[list[float]]]:
+        bids = [[100.0 - i, bid_sz] for i in range(n_bids)]
+        asks = [[100.5 + i, ask_sz] for i in range(n_asks)]
+        return bids, asks
+
+    def test_balanced_book(self) -> None:
+        from features.orderbook_features import OrderbookAnalyzer
+
+        bids, asks = self._book()
+        assert OrderbookAnalyzer.calculate_imbalance(bids, asks) == 1.0
+
+    def test_partial_book_rejected(self) -> None:
+        # асков меньше 10 уровней (рассинхрон WS) -> imb не считается
+        from features.orderbook_features import OrderbookAnalyzer
+
+        bids, asks = self._book(n_asks=2)
+        assert OrderbookAnalyzer.calculate_imbalance(bids, asks) is None
+
+    def test_extreme_ratio_rejected(self) -> None:
+        # 5.0/0.2 = 25x — вне sanity-границ, живой стакан так не перекошен
+        from features.orderbook_features import OrderbookAnalyzer
+
+        bids, asks = self._book(ask_sz=0.2)
+        assert OrderbookAnalyzer.calculate_imbalance(bids, asks) is None
+
+    def test_zero_volume_rejected(self) -> None:
+        from features.orderbook_features import OrderbookAnalyzer
+
+        bids, asks = self._book(bid_sz=0.0)
+        assert OrderbookAnalyzer.calculate_imbalance(bids, asks) is None
+
+    @pytest.mark.asyncio
+    async def test_get_snapshot_fallback_filters_garbage(self) -> None:
+        # битый снапшот: короткие списки + мусорный imb 167.6 из Redis
+        from features.orderbook_features import OrderbookAnalyzer
+
+        cache = FakeRedisCache(None, {
+            "bids": [[100.0, 5.0]], "asks": [[100.5, 5.0]],
+            "imbalance": 167.6, "updated_at": 0,
+        })
+        snap = await OrderbookAnalyzer(cache).get_snapshot("BTC/USDT:USDT")
+        assert snap is not None and snap["imbalance"] is None
+
+    @pytest.mark.asyncio
+    async def test_get_snapshot_fallback_accepts_sane(self) -> None:
+        # старый формат (без списков уровней) с валидным imb — работает
+        from features.orderbook_features import OrderbookAnalyzer
+
+        cache = FakeRedisCache(None, {
+            "bids": [[100.0, 5.0]], "asks": [[100.5, 5.0]],
+            "imbalance": 2.5, "updated_at": 0,
+        })
+        snap = await OrderbookAnalyzer(cache).get_snapshot("BTC/USDT:USDT")
+        assert snap is not None and snap["imbalance"] == 2.5
+
+
+class TestBybitCollectorOrderbook:
+    """Guard коллектора: деградировавший стакан не пушится в Redis."""
+
+    @staticmethod
+    def _collector() -> tuple["FakeRedisCache", "BybitCollector"]:
+        from data_layer.collectors.bybit_collector import BybitCollector
+
+        cache = FakeRedisCache(None)
+        return cache, BybitCollector(["BTC/USDT:USDT"], db=None, cache=cache)
+
+    @pytest.mark.asyncio
+    async def test_degraded_book_not_pushed(self) -> None:
+        # снапшот с 3 бидами и пустыми асками — пуша быть не должно
+        cache, col = self._collector()
+        await col._handle_orderbook({
+            "topic": "orderbook.50.BTCUSDT", "type": "snapshot",
+            "data": {"b": [["100", "1"]] * 3, "a": []},
+        })
+        assert cache.orderbook_pushes == []
+        assert col._degraded_books["BTC/USDT:USDT"] == 1
+
+    @pytest.mark.asyncio
+    async def test_healthy_book_pushed(self) -> None:
+        cache, col = self._collector()
+        b = [[str(100 - i), "2"] for i in range(12)]
+        a = [[str(100.5 + i), "1"] for i in range(12)]
+        await col._handle_orderbook({
+            "topic": "orderbook.50.BTCUSDT", "type": "snapshot",
+            "data": {"b": b, "a": a},
+        })
+        assert len(cache.orderbook_pushes) == 1
+        sym, snap = cache.orderbook_pushes[0]
+        assert sym == "BTC/USDT:USDT"
+        assert abs(snap["imbalance"] - 2.0) < 1e-9
+
+    @pytest.mark.asyncio
+    async def test_book_recovers_after_degradation(self) -> None:
+        # после деградации свежий snapshot снова пушится, счётчик сброшен
+        cache, col = self._collector()
+        await col._handle_orderbook({
+            "topic": "orderbook.50.BTCUSDT", "type": "snapshot",
+            "data": {"b": [["100", "1"]] * 3, "a": []},
+        })
+        b = [[str(100 - i), "2"] for i in range(12)]
+        a = [[str(100.5 + i), "1"] for i in range(12)]
+        await col._handle_orderbook({
+            "topic": "orderbook.50.BTCUSDT", "type": "snapshot",
+            "data": {"b": b, "a": a},
+        })
+        assert len(cache.orderbook_pushes) == 1
+        assert col._degraded_books["BTC/USDT:USDT"] == 0
 
 
 # ------------------------------------------------------------------ fixtures
