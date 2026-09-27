@@ -83,16 +83,32 @@ ufw allow OpenSSH >/dev/null 2>&1 || true
 echo "y" | ufw enable >/dev/null 2>&1 || true
 
 say "6/8 Код и базы данных"
-# Клонируем от root (права есть всегда), затем отдаём владельцу trader.
-# Сеть до GitHub иногда рвётся — до 5 попыток с паузой.
+# Основной путь: git. Фолбэк: tarball с codeload.github.com (IPv4).
 ok=0
-for i in 1 2 3 4 5; do
+for i in 1 2 3 4; do
     if git clone -q "$REPO_URL" "$APP_DIR" 2>/dev/null; then ok=1; break; fi
     if git -C "$APP_DIR" pull -q 2>/dev/null; then ok=1; break; fi
-    echo "Попытка $i скачать код не удалась, ждём 10 сек и пробуем снова..."
-    sleep 10
+    echo "git: попытка $i не удалась, ждём 15 сек..."
+    sleep 15
 done
-[ "$ok" = "1" ] || { echo "ОШИБКА: не удалось получить код с GitHub"; exit 1; }
+if [ "$ok" != "1" ]; then
+    echo "git недоступен — пробуем скачать архив кода..."
+    for i in 1 2 3 4; do
+        if curl -4 -fsSL --retry 3 -m 180 -o /tmp/csb.tgz \
+            "https://codeload.github.com/Matveyft/crypto-signal-bot/tar.gz/refs/heads/main"; then
+            ok=1; break
+        fi
+        echo "архив: попытка $i не удалась, ждём 15 сек..."
+        sleep 15
+    done
+    if [ "$ok" = "1" ]; then
+        mkdir -p "$APP_DIR"
+        tar xzf /tmp/csb.tgz -C "$APP_DIR" --strip-components=1
+        rm -f /tmp/csb.tgz
+        echo "Код получен из архива (режим без .git)."
+    fi
+fi
+[ "$ok" = "1" ] || { echo "ОШИБКА: код не получен ни git, ни архивом"; exit 1; }
 chown -R trader:trader "$APP_DIR"
 sudo -u trader mkdir -p "$APP_DIR/logs"
 cd "$APP_DIR"
