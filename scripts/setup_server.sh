@@ -83,8 +83,16 @@ ufw allow OpenSSH >/dev/null 2>&1 || true
 echo "y" | ufw enable >/dev/null 2>&1 || true
 
 say "6/8 Код и базы данных"
-# Клонируем от root (права есть всегда), затем отдаём владельцу trader
-git clone -q "$REPO_URL" "$APP_DIR" 2>/dev/null || git -C "$APP_DIR" pull -q
+# Клонируем от root (права есть всегда), затем отдаём владельцу trader.
+# Сеть до GitHub иногда рвётся — до 5 попыток с паузой.
+ok=0
+for i in 1 2 3 4 5; do
+    if git clone -q "$REPO_URL" "$APP_DIR" 2>/dev/null; then ok=1; break; fi
+    if git -C "$APP_DIR" pull -q 2>/dev/null; then ok=1; break; fi
+    echo "Попытка $i скачать код не удалась, ждём 10 сек и пробуем снова..."
+    sleep 10
+done
+[ "$ok" = "1" ] || { echo "ОШИБКА: не удалось получить код с GitHub"; exit 1; }
 chown -R trader:trader "$APP_DIR"
 sudo -u trader mkdir -p "$APP_DIR/logs"
 cd "$APP_DIR"

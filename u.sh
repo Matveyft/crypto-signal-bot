@@ -9,8 +9,14 @@ set -euo pipefail
 APP=/home/trader/crypto-signal-bot
 TS=$(date +%H:%M:%S)
 
-echo "[$TS] 1/4 Обновление кода из GitHub"
-sudo -u trader git -C "$APP" pull -q
+echo "[$TS] 1/4 Обновление кода из GitHub (до 5 попыток)"
+ok=0
+for i in 1 2 3 4 5; do
+    if sudo -u trader git -C "$APP" pull -q 2>/dev/null; then ok=1; break; fi
+    echo "Попытка $i не удалась, ждём 10 сек..."
+    sleep 10
+done
+[ "$ok" = "1" ] || { echo "ОШИБКА: не удалось обновить код с GitHub"; exit 1; }
 cd "$APP"
 
 echo "[$TS] 2/4 Миграции БД"
