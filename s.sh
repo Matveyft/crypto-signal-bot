@@ -182,6 +182,11 @@ systemctl enable --now csb-strategy || true
 say "Загрузка 30 дней истории (фон, ~30 мин)"
 sudo -u trader nohup "$APP_DIR/.venv/bin/python" -m scripts.load_historical \
     > "$APP_DIR/logs/load_historical.log" 2>&1 &
+# Глубина для D1/H4-индикаторов (EMA200 на дневках): быстрые догрузки
+sudo -u trader "$APP_DIR/.venv/bin/python" -m scripts.load_historical --days 400 --timeframes 1d \
+    >> "$APP_DIR/logs/load_historical.log" 2>&1 || true
+sudo -u trader "$APP_DIR/.venv/bin/python" -m scripts.load_historical --days 60 --timeframes 4h \
+    >> "$APP_DIR/logs/load_historical.log" 2>&1 || true
 
 echo ""
 echo "=============================================================="
