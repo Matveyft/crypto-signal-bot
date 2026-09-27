@@ -158,10 +158,7 @@ class SignalGenerator:
             funding: Funding-снапшот из Redis.
         """
         now = time.time()
-        if now - self._last_scan_log.get(symbol, 0) < self._scan_log_interval:
-            return
-        self._last_scan_log[symbol] = now
-
+        # Телеметрия для /scan обновляется КАЖДЫЙ цикл (до троттлинга)
         d1 = data["df_d1"].iloc[-1]
         h1 = data["df_h1"].iloc[-1]
         trend = self.regime.detect_trend(data["df_d1"])
@@ -179,6 +176,11 @@ class SignalGenerator:
             "imb": flow.get("imbalance"), "cvd30": flow.get("cvd_30m"),
             "funding": funding_rate,
         }
+        # Дальше — только лог в INFO с троттлингом раз в 15 минут
+        if now - self._last_scan_log.get(symbol, 0) < self._scan_log_interval:
+            return
+        self._last_scan_log[symbol] = now
+
         self.logger.info(
             "SCAN %s: price=%.6g(%s) trend=%s adx=%.0f rsi_h1=%.0f atr%%=%.2f "
             "| vol_filter=%s(%s) time_filter=%s | imb=%s cvd30=%s fr=%s",
