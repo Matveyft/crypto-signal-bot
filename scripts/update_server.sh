@@ -14,6 +14,8 @@ sudo -u trader git -C "$APP" pull -q
 cd "$APP"
 
 echo "[$TS] 2/4 Миграции БД"
+# Сначала гарантируем схему (идемпотентно), потом миграции
+sudo -u trader "$APP/.venv/bin/python" -m scripts.init_db || true
 docker exec csb-timescaledb psql -U trader -d crypto_signals -c \
     "ALTER TABLE positions ADD COLUMN IF NOT EXISTS limit_price DOUBLE PRECISION;" -q
 
