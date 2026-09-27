@@ -36,6 +36,15 @@ class TelegramNotifier:
         self._admin_chat = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
         self._session: aiohttp.ClientSession | None = None
         self._offset = 0
+        self._scans_provider: Any = None  # SignalGenerator.last_scans
+
+    def attach_scans(self, generator: Any) -> None:
+        """Подключает источник телеметрии сканов (SignalGenerator).
+
+        Args:
+            generator: SignalGenerator с атрибутом last_scans.
+        """
+        self._scans_provider = generator
 
     @property
     def enabled(self) -> bool:
@@ -223,10 +232,13 @@ class TelegramNotifier:
         if command == "/help":
             await self.send_admin(
                 "Команды:\n/status — здоровье системы\n"
+                "/scan — близость к сигналу по всем монетам\n"
                 "/stats — статистика сигналов\n/positions — открытые позиции"
             )
         elif command == "/status":
             await self.send_admin(await self._build_status())
+        elif command == "/scan":
+            await self.send_admin(self._build_scan())
         elif command == "/stats":
             await self.send_admin(await self._build_stats())
         elif command == "/positions":
@@ -267,6 +279,53 @@ class TelegramNotifier:
             f"Активных позиций: {positions}\n"
             f"Время: {datetime.now(tz=timezone.utc).strftime('%H:%M UTC')}"
         )
+
+    def _build_scan(self) -> str:
+        """Телеметрия близости к сигналу по всем символам (для /scan).
+
+        Показывает по каждой монете: цену, тренд D1, ADX, RSI, ATR%,
+        статус пре-фильтров (vol/time) и микропоток (imb/cvd).
+        Считает, сколько символов проходят все условия разом.
+
+        Returns:
+            HTML-текст с моноширинной таблицей.
+        """
+        if not self._scans_provider or not getattr(
+            self._scans_provider, "last_scans", None
+        ):
+            return "⏳ Данных ещё нет — подождите первый цикл сканирования (1 мин)"
+        scans = self._scans_provider.last_scans
+        icon = {"uptrend": "▲", "downtrend": "▼", "sideways": "■"}
+        lines = ["🔍 <b>Близость к сигналу</b>\n<pre>"]
+        ready = 0
+        for symbol in sorted(scans):
+            s = scans[symbol]
+            tr = icon.get(s["trend"], "?")
+            vol = "✓" if s["vol_ok"] else "✗"
+            imb = s["imb"]
+            cvd = s["cvd30"]
+            imb_s = f"{imb:.1f}" if imb is not None else "—"
+            cvd_s = ("+" if cvd and cvd > 0 else "−") if cvd is not None else "—"
+            # Полный набор пре-условий LONG-сетапа (тренд+ADX+фильтры+поток)
+            if (s["trend"] == "uptrend" and s["adx"] > 25 and s["vol_ok"]
+                    and s["time_ok"] and imb is not None and imb >= 1.8
+                    and cvd is not None and cvd > 0):
+                ready += 1
+                mark = "⚡"
+            else:
+                mark = " "
+            lines.append(
+                f"{mark}{symbol.split('/')[0]:6}{s['price']:<9.6g}{tr} "
+                f"ADX{s['adx']:<3.0f}RSI{s['rsi']:<3.0f}"
+                f"vol{vol} imb{imb_s:<5}cvd{cvd_s}"
+            )
+        lines.append("</pre>")
+        lines.append(
+            f"Пре-условия сетапа выполняются у {ready} из {len(scans)} монет"
+            f" (нужен ещё откат к уровню + свечное подтверждение M15)"
+        )
+        lines.append("⬤ ▲ тренд вверх ▼ вниз ■ боковик ⚡ поток подтверждён")
+        return "\n".join(lines)
 
     async def _build_stats(self) -> str:
         """Статистика по закрытым позициям: win rate, PnL, по стратегиям.

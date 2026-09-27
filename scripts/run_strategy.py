@@ -38,6 +38,7 @@ class StrategyRunner:
         self._cache = RedisCache()
         self.generator = SignalGenerator(self._db, self._cache, self.params)
         self.notifier = TelegramNotifier(self._db)
+        self.notifier.attach_scans(self.generator)
         self.account_balance = account_balance
         self.scan_interval = self.params.get("signal", {}).get("scan_interval_sec", 60)
         self.min_confidence = self.params.get("signal", {}).get("min_confidence", 0.6)

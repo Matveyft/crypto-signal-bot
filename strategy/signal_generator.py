@@ -54,6 +54,8 @@ class SignalGenerator:
         self._last_signal_at: dict[str, float] = {}  # cooldown per symbol
         self._last_scan_log: dict[str, float] = {}   # троттлинг телеметрии
         self._scan_log_interval = 900  # телеметрия раз в 15 мин на символ
+        # Последняя телеметрия по каждому символу (для команды /scan)
+        self.last_scans: dict[str, dict[str, Any]] = {}
 
     # ----------------------------------------------------------------- public
     async def generate_signals(self, symbol: str) -> dict[str, Any] | None:
@@ -168,6 +170,15 @@ class SignalGenerator:
         funding_rate = (funding or {}).get("funding_rate")
         price = data.get("live_price") or float(h1["close"])
         price_src = "live" if data.get("live_price") else "h1"
+        # Телеметрия для /scan (обновляется каждый цикл, без троттлинга)
+        self.last_scans[symbol] = {
+            "price": price, "trend": trend,
+            "adx": float(d1["adx"]), "rsi": float(h1["rsi"]),
+            "atr_pct": float(h1["atr"]) / float(h1["close"]) * 100,
+            "vol_ok": vol_ok, "time_ok": time_ok,
+            "imb": flow.get("imbalance"), "cvd30": flow.get("cvd_30m"),
+            "funding": funding_rate,
+        }
         self.logger.info(
             "SCAN %s: price=%.6g(%s) trend=%s adx=%.0f rsi_h1=%.0f atr%%=%.2f "
             "| vol_filter=%s(%s) time_filter=%s | imb=%s cvd30=%s fr=%s",
