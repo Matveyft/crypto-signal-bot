@@ -90,6 +90,11 @@ class StrategyRunner:
             if not self._running:
                 break
             if self.generator.in_cooldown(symbol):
+                # Телеметрия не обновляется во время cooldown — помечаем
+                # строку в /scan, чтобы заморозка не выглядела сбоем данных
+                scan = self.generator.last_scans.get(symbol)
+                if scan is not None:
+                    scan["cooldown"] = True
                 continue
             try:
                 signal = await self.generator.generate_signals(symbol)
