@@ -23,6 +23,10 @@ from data_layer.collectors.base_collector import BaseCollector
 from data_layer.storage.redis_cache import RedisCache
 from data_layer.storage.timescale_manager import TimescaleManager
 from data_layer.utils import load_config, symbol_to_bybit
+from features.orderbook_features import (
+    IMBALANCE_SANITY_MAX,
+    IMBALANCE_SANITY_MIN,
+)
 
 WS_URL = "wss://stream.bybit.com/v5/public/linear"
 SUBSCRIBE_CHUNK = 10  # Bybit: максимум 10 args на один subscribe-запрос
@@ -207,10 +211,11 @@ class BybitCollector(BaseCollector):
     async def _handle_orderbook(self, msg: dict[str, Any]) -> None:
         """Обновляет стакан, считает imbalance и стены, пушит в Redis.
 
-        Деградировавший стакан (<10 уровней с любой стороны — рассинхрон
-        snapshot/diff после реконнекта) не пушится: свежий snapshot биржа
-        присылает при следующем переподключении, до него imb считается
-        отсутствующим, а не мусорным.
+        Деградировавший стакан не пушится (счётчик деградации растёт,
+        при длительной деградации топик переподписывается). Режимы
+        деградации: <10 уровней с любой стороны (рассинхрон snapshot/diff),
+        нулевой объём стороны или imbalance вне sanity-границ — вторая
+        сторона стакана «пустая» на вид, но по уровням формально есть.
 
         Args:
             msg: Распарсенное сообщение orderbook.50.
@@ -235,28 +240,37 @@ class BybitCollector(BaseCollector):
 
         bids = [(float(p), float(s)) for p, s in book["b"][:50]]
         asks = [(float(p), float(s)) for p, s in book["a"][:50]]
-        if len(bids) < 10 or len(asks) < 10:
+        bid_vol = sum(s for _, s in bids[:10])
+        ask_vol = sum(s for _, s in asks[:10])
+        imbalance = (
+            bid_vol / ask_vol
+            if ask_vol > 0 and bid_vol > 0 else None
+        )
+        degraded = (
+            len(bids) < 10 or len(asks) < 10
+            or imbalance is None
+            or not (IMBALANCE_SANITY_MIN <= imbalance <= IMBALANCE_SANITY_MAX)
+        )
+        if degraded:
             count = self._degraded_books.get(ccxt_sym, 0) + 1
             self._degraded_books[ccxt_sym] = count
             if count == 1 or count % 100 == 0:
                 self.logger.warning(
                     "Orderbook degraded for %s (%d updates in row): "
-                    "%d bid / %d ask levels, waiting for fresh snapshot",
-                    ccxt_sym, count, len(bids), len(asks))
+                    "%d bid / %d ask levels, imb=%s, waiting for fresh snapshot",
+                    ccxt_sym, count, len(bids), len(asks),
+                    f"{imbalance:.1f}" if imbalance is not None else "n/a")
             if count % ORDERBOOK_RESUBSCRIBE_AFTER == 0:
                 await self._resubscribe_orderbook(
                     ccxt_sym, msg["topic"])
             return
         self._degraded_books[ccxt_sym] = 0
-        bid_vol = sum(s for _, s in bids[:10])
-        ask_vol = sum(s for _, s in asks[:10])
-        imbalance = bid_vol / ask_vol if ask_vol > 0 and bid_vol > 0 else None
         await self._cache.set_orderbook(ccxt_sym, {
             "bids": bids[:20],
             "asks": asks[:20],
             "bid_volume_top10": bid_vol,
             "ask_volume_top10": ask_vol,
-            "imbalance": round(imbalance, 4) if imbalance is not None else None,
+            "imbalance": round(imbalance, 4),
             "updated_at": time.time(),
         })
 

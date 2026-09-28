@@ -158,6 +158,20 @@ class TestBybitCollectorOrderbook:
         assert abs(snap["imbalance"] - 2.0) < 1e-9
 
     @pytest.mark.asyncio
+    async def test_extreme_ratio_book_not_pushed(self) -> None:
+        # 12 уровней с обеих сторон, но аски пыльевые: ratio 40x > 20
+        # — пушить нельзя, счётчик деградации растёт (режим imb— в /scan)
+        cache, col = self._collector()
+        b = [[str(100 - i), "2"] for i in range(12)]
+        a = [[str(100.5 + i), "0.05"] for i in range(12)]
+        await col._handle_orderbook({
+            "topic": "orderbook.50.BTCUSDT", "type": "snapshot",
+            "data": {"b": b, "a": a},
+        })
+        assert cache.orderbook_pushes == []
+        assert col._degraded_books["BTC/USDT:USDT"] == 1
+
+    @pytest.mark.asyncio
     async def test_book_recovers_after_degradation(self) -> None:
         # после деградации свежий snapshot снова пушится, счётчик сброшен
         cache, col = self._collector()
@@ -220,6 +234,29 @@ class TestOrderbookResubscribe:
         assert topics == ["orderbook.50.BTCUSDT"] * 2
         # счётчик сброшен — следующий цикл начнётся с нуля
         assert col._degraded_books["BTC/USDT:USDT"] == 0
+
+    @pytest.mark.asyncio
+    async def test_resubscribe_fires_on_extreme_ratio_mode(self) -> None:
+        # деградация без нехватки уровней (ratio вне sanity) должна
+        # попадать в тот же путь ресабскрайба, а не только <10 уровней
+        import json as _json
+
+        from data_layer.collectors.bybit_collector import (
+            ORDERBOOK_RESUBSCRIBE_AFTER,
+        )
+
+        _, col, ws = self._collector_with_ws()
+        msg = {
+            "topic": "orderbook.50.BTCUSDT", "type": "snapshot",
+            "data": {
+                "b": [[str(100 - i), "2"] for i in range(12)],
+                "a": [[str(100.5 + i), "0.05"] for i in range(12)],
+            },
+        }
+        for _ in range(ORDERBOOK_RESUBSCRIBE_AFTER):
+            await col._handle_orderbook(msg)
+        assert [ _json.loads(s)["op"] for s in ws.sent ] == \
+            ["unsubscribe", "subscribe"]
 
     @pytest.mark.asyncio
     async def test_below_threshold_no_resubscribe(self) -> None:
