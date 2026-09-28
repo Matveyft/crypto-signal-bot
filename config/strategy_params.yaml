@@ -37,7 +37,7 @@ risk_management:
   leverage: 5
 
 signal:
-  scan_interval_sec: 60
+  scan_interval_sec: 30              # чаще цикл = выше шанс поймать совпадение условий (V-развороты)
   min_confidence: 0.6
   cooldown_minutes: 60             # не сигналим тот же символ чаще, чем раз в N минут
   limit_offset_pct: 0.15           # лимитка на столько % лучше текущей цены
