@@ -175,6 +175,79 @@ class TestBybitCollectorOrderbook:
         assert col._degraded_books["BTC/USDT:USDT"] == 0
 
 
+class FakeWs:
+    """Мок WebSocket: запоминает отправленные сообщения."""
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    async def send(self, raw: str) -> None:
+        self.sent.append(raw)
+
+
+class TestOrderbookResubscribe:
+    """Форс-ресабскрайб топика при длительной деградации стакана."""
+
+    DEGRADED = {"topic": "orderbook.50.BTCUSDT", "type": "snapshot",
+                "data": {"b": [["100", "1"]] * 3, "a": []}}
+
+    @staticmethod
+    def _collector_with_ws() -> tuple["FakeRedisCache", "BybitCollector", FakeWs]:
+        from data_layer.collectors.bybit_collector import (
+            BybitCollector,
+        )
+
+        cache = FakeRedisCache(None)
+        col = BybitCollector(["BTC/USDT:USDT"], db=None, cache=cache)
+        ws = FakeWs()
+        col._ws = ws
+        return cache, col, ws
+
+    @pytest.mark.asyncio
+    async def test_resubscribe_fires_after_threshold(self) -> None:
+        import json as _json
+
+        from data_layer.collectors.bybit_collector import (
+            ORDERBOOK_RESUBSCRIBE_AFTER,
+        )
+
+        _, col, ws = self._collector_with_ws()
+        for _ in range(ORDERBOOK_RESUBSCRIBE_AFTER):
+            await col._handle_orderbook(self.DEGRADED)
+        ops = [_json.loads(s)["op"] for s in ws.sent]
+        assert ops == ["unsubscribe", "subscribe"]
+        topics = [_json.loads(s)["args"][0] for s in ws.sent]
+        assert topics == ["orderbook.50.BTCUSDT"] * 2
+        # счётчик сброшен — следующий цикл начнётся с нуля
+        assert col._degraded_books["BTC/USDT:USDT"] == 0
+
+    @pytest.mark.asyncio
+    async def test_below_threshold_no_resubscribe(self) -> None:
+        from data_layer.collectors.bybit_collector import (
+            ORDERBOOK_RESUBSCRIBE_AFTER,
+        )
+
+        _, col, ws = self._collector_with_ws()
+        for _ in range(ORDERBOOK_RESUBSCRIBE_AFTER - 1):
+            await col._handle_orderbook(self.DEGRADED)
+        assert ws.sent == []
+
+    @pytest.mark.asyncio
+    async def test_resubscribe_cooldown(self) -> None:
+        import time as _time
+
+        from data_layer.collectors.bybit_collector import (
+            ORDERBOOK_RESUBSCRIBE_AFTER,
+        )
+
+        _, col, ws = self._collector_with_ws()
+        # только что ресабскрайбили — повтор заблокирован cooldown'ом
+        col._resubscribe_at["BTC/USDT:USDT"] = _time.time()
+        for _ in range(ORDERBOOK_RESUBSCRIBE_AFTER * 3):
+            await col._handle_orderbook(self.DEGRADED)
+        assert ws.sent == []
+
+
 # ------------------------------------------------------------------ fixtures
 def make_df(n: int = 300, trend: float = 0.0, seed: int = 42) -> pd.DataFrame:
     """Синтетический OHLCV DataFrame.

@@ -26,6 +26,10 @@ from data_layer.utils import load_config, symbol_to_bybit
 
 WS_URL = "wss://stream.bybit.com/v5/public/linear"
 SUBSCRIBE_CHUNK = 10  # Bybit: максимум 10 args на один subscribe-запрос
+# Столько деградировавших orderbook-сообщений подряд -> форс-ресабскрайб
+# топика (биржа отвечает свежим snapshot; kline/trade-потоки не рвутся)
+ORDERBOOK_RESUBSCRIBE_AFTER = 200
+ORDERBOOK_RESUBSCRIBE_COOLDOWN_SEC = 60.0
 
 
 def _ms_to_dt(ms: int) -> datetime:
@@ -75,6 +79,10 @@ class BybitCollector(BaseCollector):
         self._books: dict[str, dict[str, list[list[str]]]] = {}
         # Счётчики подряд деградировавших стаканов (троттлинг warning'ов)
         self._degraded_books: dict[str, int] = {}
+        # Последний форс-ресабскрайб топика стакана (cooldown per symbol)
+        self._resubscribe_at: dict[str, float] = {}
+        # Текущий WS (для ресабскрайба из обработчика стакана)
+        self._ws: Any | None = None
 
     async def _run(self) -> None:
         """Основной цикл: connect -> subscribe -> receive loop."""
@@ -84,6 +92,7 @@ class BybitCollector(BaseCollector):
             async with websockets.connect(
                 WS_URL, ping_interval=None, max_queue=4096
             ) as ws:
+                self._ws = ws
                 await self._subscribe(ws)
                 pinger = asyncio.create_task(self._ping_loop(ws))
                 self.logger.info("WebSocket connected, receiving messages")
@@ -92,6 +101,7 @@ class BybitCollector(BaseCollector):
                     self.stats["last_message_at"] = time.time()
                     await self._handle_message(raw)
         finally:
+            self._ws = None
             if pinger is not None:
                 pinger.cancel()
             flusher.cancel()
@@ -233,6 +243,9 @@ class BybitCollector(BaseCollector):
                     "Orderbook degraded for %s (%d updates in row): "
                     "%d bid / %d ask levels, waiting for fresh snapshot",
                     ccxt_sym, count, len(bids), len(asks))
+            if count % ORDERBOOK_RESUBSCRIBE_AFTER == 0:
+                await self._resubscribe_orderbook(
+                    ccxt_sym, msg["topic"])
             return
         self._degraded_books[ccxt_sym] = 0
         bid_vol = sum(s for _, s in bids[:10])
@@ -246,6 +259,31 @@ class BybitCollector(BaseCollector):
             "imbalance": round(imbalance, 4) if imbalance is not None else None,
             "updated_at": time.time(),
         })
+
+    async def _resubscribe_orderbook(self, ccxt_sym: str, topic: str) -> None:
+        """Переподписывает топик стакана, чтобы биржа прислала snapshot.
+
+        Деградировавший после рассинхрона book восстанавливается только
+        свежим snapshot, а Bybit шлёт его в ответ на подписку. Cooldown —
+        не чаще раза в ORDERBOOK_RESUBSCRIBE_COOLDOWN_SEC на символ.
+
+        Args:
+            ccxt_sym: Символ ccxt (для cooldown-ключа).
+            topic: Полный WS-топик ('orderbook.50.BTCUSDT').
+        """
+        now = time.time()
+        if now - self._resubscribe_at.get(ccxt_sym, 0.0) \
+                < ORDERBOOK_RESUBSCRIBE_COOLDOWN_SEC:
+            return
+        self._resubscribe_at[ccxt_sym] = now
+        self._degraded_books[ccxt_sym] = 0
+        if self._ws is None:
+            return
+        self.logger.warning(
+            "Orderbook for %s degraded too long, resubscribing %s",
+            ccxt_sym, topic)
+        await self._ws.send(json.dumps({"op": "unsubscribe", "args": [topic]}))
+        await self._ws.send(json.dumps({"op": "subscribe", "args": [topic]}))
 
     # ------------------------------------------------------------------ CVD
     async def _flush_loop(self) -> None:
