@@ -37,6 +37,9 @@ echo "[$TS] 2/4 Миграции БД"
 sudo -u trader "$APP/.venv/bin/python" -m scripts.init_db || true
 docker exec csb-timescaledb psql -U trader -d crypto_signals -c \
     "ALTER TABLE positions ADD COLUMN IF NOT EXISTS limit_price DOUBLE PRECISION;" -q
+# NOT NULL-колонки без дефолта ломали INSERT позиций (NULL -> constraint)
+docker exec csb-timescaledb psql -U trader -d crypto_signals -c \
+    "ALTER TABLE positions ALTER COLUMN trailing_active SET DEFAULT false;" -q
 
 echo "[$TS] 3/4 Зависимости (если изменились)"
 sudo -u trader "$APP/.venv/bin/pip" install -q -r requirements.txt

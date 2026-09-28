@@ -91,17 +91,23 @@ class StrategyRunner:
                 break
             if self.generator.in_cooldown(symbol):
                 continue
-            signal = await self.generator.generate_signals(symbol)
-            if signal is None or signal["confidence"] < self.min_confidence:
-                continue
-            self.generator.mark_signaled(symbol)
-            signal["position_size"] = self.generator.risk.calculate_position_size(
-                account_balance=self.account_balance,
-                entry_price=signal["entry"],
-                stop_loss=signal["stop"],
-            )
-            await self._save_signal(signal)
-            self._notify(signal)
+            try:
+                signal = await self.generator.generate_signals(symbol)
+                if signal is None or signal["confidence"] < self.min_confidence:
+                    continue
+                signal["position_size"] = self.generator.risk.calculate_position_size(
+                    account_balance=self.account_balance,
+                    entry_price=signal["entry"],
+                    stop_loss=signal["stop"],
+                )
+                # Cooldown включаем только после успешной записи: сбой БД
+                # не должен ослеплять символ на час (инцидент 2026-09-28,
+                # ETH-сигнал conf 0.90 умер на INSERT, cooldown остался)
+                await self._save_signal(signal)
+                self.generator.mark_signaled(symbol)
+                self._notify(signal)
+            except Exception:
+                logger.exception("Signal processing failed for %s", symbol)
 
     async def _save_signal(self, signal: dict[str, Any]) -> None:
         """Сохраняет сигнал и создаёт позицию в статусе pending (ждёт лимитку).
@@ -127,9 +133,9 @@ class StrategyRunner:
             signal_id = result.scalar_one()
             await conn.execute(text(
                 "INSERT INTO positions (signal_id, symbol, side, limit_price,"
-                " entry, stop, target, size, status) VALUES"
+                " entry, stop, target, size, status, trailing_active) VALUES"
                 " (:sid, :symbol, :side, :limit, :entry, :stop,"
-                " :target, :size, 'pending')"
+                " :target, :size, 'pending', FALSE)"
             ), {
                 "sid": signal_id, "symbol": signal["symbol"], "side": signal["type"],
                 "limit": limit, "entry": limit,

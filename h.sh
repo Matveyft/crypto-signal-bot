@@ -37,6 +37,10 @@ journalctl -u csb-strategy --since "24 hours ago" --no-pager 2>/dev/null | grep 
 journalctl -u csb-collector --since "24 hours ago" --no-pager 2>/dev/null | grep -iE "error|crashed" | tail -5
 
 echo ""
+echo "=================== ПОСЛЕДНИЙ ТРЕЙСБЕК (strategy)"
+journalctl -u csb-strategy --no-pager 2>/dev/null | grep -B 1 -A 20 -m 1 "Traceback" || echo "(трейсбеков нет)"
+
+echo ""
 echo "=================== ЗАГРУЗКА ИСТОРИИ ==========="
 tail -3 $APP/logs/load_historical.log 2>/dev/null || echo "(лог недоступен)"
 echo "================================================"

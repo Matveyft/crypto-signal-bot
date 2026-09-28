@@ -13,6 +13,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -106,7 +107,9 @@ class Position(Base):
     stop: Mapped[float] = mapped_column(Float, nullable=False)
     target: Mapped[float] = mapped_column(Float, nullable=False)
     size: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
-    trailing_active: Mapped[bool] = mapped_column(default=False)
+    trailing_active: Mapped[bool] = mapped_column(
+        default=False, server_default=text("false")
+    )
     status: Mapped[str] = mapped_column(String(10), nullable=False, default="open")
     opened_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
