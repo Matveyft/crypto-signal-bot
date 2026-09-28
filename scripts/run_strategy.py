@@ -86,9 +86,19 @@ class StrategyRunner:
     # ----------------------------------------------------------------- scan
     async def scan_all(self) -> None:
         """Сканирует все символы, сохраняет сигналы, шлёт уведомления."""
+        # Один сигнал/позиция на символ: не дублируем сетап, пока по символу
+        # есть открытая или ждущая исполнения позиция (инцидент 19:04 —
+        # повторный BTC-сигнал создал позицию, которая просто истекла по TTL)
+        async with self._db.engine.begin() as conn:
+            busy = set((await conn.execute(text(
+                "SELECT DISTINCT symbol FROM positions"
+                " WHERE status IN ('open', 'pending')"
+            ))).scalars())
         for symbol in self.cfg["symbols"]:
             if not self._running:
                 break
+            if symbol in busy:
+                continue
             if self.generator.in_cooldown(symbol):
                 # Телеметрия не обновляется во время cooldown — помечаем
                 # строку в /scan, чтобы заморозка не выглядела сбоем данных
@@ -149,6 +159,27 @@ class StrategyRunner:
                 "size": signal["position_size"]["qty"],
             })
 
+    def _send(self, coro: Any, what: str) -> None:
+        """Планирует отправку уведомления, логируя ошибки задачи.
+
+        Голый ensure_future молча проглатывает исключения — так терялись
+        сообщения канала, пока это не нашли руками.
+
+        Args:
+            coro: Корутина отправки (notifier.send_channel / send_admin).
+            what: Имя уведомления для лога.
+        """
+        task = asyncio.ensure_future(coro)
+
+        def _on_done(t: asyncio.Task) -> None:
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error("Notify failed (%s): %s", what, exc, exc_info=exc)
+
+        task.add_done_callback(_on_done)
+
     def _notify(self, signal: dict[str, Any]) -> None:
         """Уведомление о сигнале (пока print; сюда встраивается Telegram/webhook).
 
@@ -167,8 +198,8 @@ class StrategyRunner:
         print(f"reason: {signal['reason']}")
         print("=" * 70)
         html = self.notifier.format_signal(signal)
-        asyncio.ensure_future(self.notifier.send_channel(html))
-        asyncio.ensure_future(self.notifier.send_admin(html))
+        self._send(self.notifier.send_channel(html), f"signal {signal['symbol']}")
+        self._send(self.notifier.send_admin(html), f"signal-admin {signal['symbol']}")
         logger.info("Signal saved: %s %s %s conf=%.2f", signal["symbol"],
                     signal["type"], signal["strategy"], signal["confidence"])
 
@@ -213,8 +244,9 @@ class StrategyRunner:
             pos["entry"] = limit
             logger.info("Pending %s %s: filled at %.6g", pos["symbol"],
                         pos["side"], limit)
-            asyncio.ensure_future(self.notifier.send_channel(
-                self.notifier.format_lifecycle(pos, "filled")))
+            self._send(self.notifier.send_channel(
+                self.notifier.format_lifecycle(pos, "filled")),
+                f"filled {pos['symbol']}")
         elif age_min > self.limit_ttl:
             async with self._db.engine.begin() as conn:
                 await conn.execute(text(
@@ -222,8 +254,9 @@ class StrategyRunner:
                     " closed_at = :now WHERE id = :id"
                 ), {"now": now, "id": pos["id"]})
             logger.info("Pending %s %s: cancelled (TTL)", pos["symbol"], pos["side"])
-            asyncio.ensure_future(self.notifier.send_channel(
-                self.notifier.format_lifecycle(pos, "cancelled")))
+            self._send(self.notifier.send_channel(
+                self.notifier.format_lifecycle(pos, "cancelled")),
+                f"cancelled {pos['symbol']}")
 
     async def _get_last_price(self, symbol: str) -> float | None:
         """Последняя цена: из Redis (текущая свеча) или БД (закрытая).
@@ -279,8 +312,9 @@ class StrategyRunner:
             pos["exit_price"] = exit_price
             pos["pnl_pct"] = pnl_pct
             event = "tp" if status == "target" else "sl"
-            asyncio.ensure_future(self.notifier.send_channel(
-                self.notifier.format_lifecycle(pos, event)))
+            self._send(self.notifier.send_channel(
+                self.notifier.format_lifecycle(pos, event)),
+                f"{event} {pos['symbol']}")
             return
 
         # Trailing: при 1:1 переносим стоп в безубыток
@@ -297,8 +331,9 @@ class StrategyRunner:
                     ), {"stop": breakeven, "id": pos["id"]})
                 logger.info("Position %s %s: trailing activated, stop -> breakeven %.6g",
                             pos["id"], pos["symbol"], breakeven)
-                asyncio.ensure_future(self.notifier.send_channel(
-                    self.notifier.format_lifecycle(pos, "breakeven")))
+                self._send(self.notifier.send_channel(
+                    self.notifier.format_lifecycle(pos, "breakeven")),
+                    f"breakeven {pos['symbol']}")
 
 
 async def main() -> None:
