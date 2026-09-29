@@ -102,8 +102,16 @@ class StrategyRunner:
                 # позиции — помечаем строку в /scan, чтобы застывшие
                 # цифры не выглядели живыми данными
                 scan = self.generator.last_scans.get(symbol)
-                if scan is not None:
-                    scan["in_position"] = True
+                if scan is None:
+                    # Рестарт при открытой позиции: телеметрии нет вовсе —
+                    # строка пропадала из /scan целиком (инцидент XRP 29.09).
+                    # Создаём заглушку с прочерками вместо метрик
+                    scan = {"price": None, "trend": "?", "adx": None,
+                            "rsi": None, "atr_pct": None, "vol_ok": None,
+                            "time_ok": False, "imb": None, "cvd30": None,
+                            "funding": None, "book_age": None}
+                    self.generator.last_scans[symbol] = scan
+                scan["in_position"] = True
                 continue
             if self.generator.in_cooldown(symbol):
                 # Телеметрия не обновляется во время cooldown — помечаем

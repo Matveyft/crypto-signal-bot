@@ -301,7 +301,13 @@ class TelegramNotifier:
         for symbol in sorted(scans):
             s = scans[symbol]
             tr = icon.get(s["trend"], "?")
-            vol = "✓" if s["vol_ok"] else "✗"
+            vol_ok = s.get("vol_ok")
+            vol = "—" if vol_ok is None else ("✓" if vol_ok else "✗")
+            # Заглушки (рестарт при открытой позиции) несут None — им прочерки
+            price_s = (f"{s['price']:<9.6g}" if s["price"] is not None
+                       else "—        ")
+            adx_s = f"{s['adx']:<3.0f}" if s["adx"] is not None else "—  "
+            rsi_s = f"{s['rsi']:<3.0f}" if s["rsi"] is not None else "—  "
             imb = s["imb"]
             cvd = s["cvd30"]
             imb_s = f"{imb:.1f}" if imb is not None else "—"
@@ -322,8 +328,8 @@ class TelegramNotifier:
             else:
                 mark = " "
             lines.append(
-                f"{mark}{symbol.split('/')[0]:6}{s['price']:<9.6g}{tr} "
-                f"ADX{s['adx']:<3.0f}RSI{s['rsi']:<3.0f}"
+                f"{mark}{symbol.split('/')[0]:6}{price_s}{tr} "
+                f"ADX{adx_s}RSI{rsi_s}"
                 f"vol{vol} imb{imb_s:<5}cvd{cvd_s} {age_s}{cd}"
             )
         lines.append("</pre>")
