@@ -98,6 +98,12 @@ class StrategyRunner:
             if not self._running:
                 break
             if symbol in busy:
+                # Телеметрия заморожена с последнего скана до закрытия
+                # позиции — помечаем строку в /scan, чтобы застывшие
+                # цифры не выглядели живыми данными
+                scan = self.generator.last_scans.get(symbol)
+                if scan is not None:
+                    scan["in_position"] = True
                 continue
             if self.generator.in_cooldown(symbol):
                 # Телеметрия не обновляется во время cooldown — помечаем

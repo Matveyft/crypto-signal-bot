@@ -309,10 +309,14 @@ class TelegramNotifier:
             age = s.get("book_age")
             age_s = f"{age:.0f}s" if age is not None else "—"
             cd = " ⏳" if s.get("cooldown") else ""
-            # Полный набор пре-условий LONG-сетапа (тренд+ADX+фильтры+поток)
-            if (s["trend"] == "uptrend" and s["adx"] > 25 and s["vol_ok"]
+            if s.get("in_position"):
+                # Строка заморожена с последнего скана до закрытия позиции:
+                # ⚡ и счётчик ready по ней — иллюзия, метрики не пересчитываются
+                mark = "📍"
+            elif (s["trend"] == "uptrend" and s["adx"] > 25 and s["vol_ok"]
                     and s["time_ok"] and imb is not None and imb >= 1.8
                     and cvd is not None and cvd > 0):
+                # Полный набор пре-условий LONG-сетапа (тренд+ADX+фильтры+поток)
                 ready += 1
                 mark = "⚡"
             else:
@@ -329,7 +333,8 @@ class TelegramNotifier:
         )
         lines.append("⬤ ▲ тренд вверх ▼ вниз ■ боковик ⚡ поток подтверждён "
                      "· aN — возраст стакана, imb— — стакан деградирован, "
-                     "⏳ — cooldown после сигнала (строка не обновляется)")
+                     "⏳ — cooldown после сигнала, 📍 — открытая позиция "
+                     "(строка не обновляется)")
         return "\n".join(lines)
 
     async def _build_stats(self) -> str:
