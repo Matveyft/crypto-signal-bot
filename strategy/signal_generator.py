@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 from typing import Any
 
 import pandas as pd
@@ -56,6 +57,12 @@ class SignalGenerator:
         self._scan_log_interval = 900  # телеметрия раз в 15 мин на символ
         # Последняя телеметрия по каждому символу (для команды /scan)
         self.last_scans: dict[str, dict[str, Any]] = {}
+        # История замеров имбаленса (ts, imb) на символ — окно живости
+        # (signal.flow_window_minutes; 0 = только текущий снапшот)
+        self._flow_history: dict[str, deque[tuple[float, float]]] = {}
+        self._flow_window_sec = float(
+            self.params.get("signal", {}).get("flow_window_minutes", 15)
+        ) * 60
 
     # ----------------------------------------------------------------- public
     async def generate_signals(self, symbol: str) -> dict[str, Any] | None:
@@ -77,6 +84,12 @@ class SignalGenerator:
                 return None
             flow = await self.orderbook.get_flow_metrics(symbol)
             funding = await self._cache.get_funding(symbol)
+            # Окно живости потока: augment снапшот экстремумами имбаленса,
+            # чтобы гейты сетапов не зависели от одной минуты (инцидент
+            # ретеста ETH 2731 — стена съедена в минуту касания)
+            self._record_flow(symbol, flow)
+            flow["imb_window_min"], flow["imb_window_max"] = self._windowed_imb(
+                symbol, flow.get("imbalance"))
             # Live-цена: текущая минутка из Redis (закрытая H1 в БД отстаёт до часа)
             live = await self._cache.get_candle(symbol, "1m")
             data["live_price"] = float(live["close"]) if live else None
@@ -174,6 +187,7 @@ class SignalGenerator:
             "atr_pct": float(h1["atr"]) / float(h1["close"]) * 100,
             "vol_ok": vol_ok, "time_ok": time_ok,
             "imb": flow.get("imbalance"), "cvd30": flow.get("cvd_30m"),
+            "imb_window_max": flow.get("imb_window_max"),
             "funding": funding_rate,
             "book_age": flow.get("snapshot_age_sec"),
         }
@@ -211,6 +225,51 @@ class SignalGenerator:
             symbol: Символ ccxt.
         """
         self._last_signal_at[symbol] = time.time()
+
+    def _record_flow(self, symbol: str, flow: dict[str, Any]) -> None:
+        """Помнит последние замеры имбаленса для окна живости.
+
+        Args:
+            symbol: Символ ccxt.
+            flow: Метрики стакана/CVD (get_flow_metrics).
+        """
+        imb = flow.get("imbalance")
+        if imb is None:  # деградированный/чужой стакан в историю не пишем
+            return
+        hist = self._flow_history.setdefault(
+            symbol, deque(maxlen=60))  # 30 замеров на окно 15 мин при скане 30с
+        hist.append((time.time(), float(imb)))
+
+    def _windowed_imb(
+        self, symbol: str, current_imb: float | None
+    ) -> tuple[float | None, float | None]:
+        """(min, max) имбаленса в окне живости; текущий снапшот включён.
+
+        Окно signal.flow_window_minutes; 0 — только текущий снапшот
+        (старое поведение без истории). Нет ни снапшота, ни истории —
+        (None, None).
+
+        Args:
+            symbol: Символ ccxt.
+            current_imb: Имбаленс текущего снапшота (может быть None).
+
+        Returns:
+            (минимум, максимум) по окну.
+        """
+        now = time.time()
+        values: list[float] = []
+        if current_imb is not None:
+            values.append(float(current_imb))
+        if self._flow_window_sec > 0:
+            hist = self._flow_history.get(symbol)
+            if hist:
+                values.extend(
+                    imb for ts, imb in hist
+                    if now - ts <= self._flow_window_sec
+                )
+        if not values:
+            return None, None
+        return min(values), max(values)
 
     # ------------------------------------------------------------------- data
     async def _load_data(self, symbol: str) -> dict[str, Any] | None:
@@ -313,15 +372,20 @@ class SignalGenerator:
         if not confirmed:
             return None
 
-        # --- Flow: стакан и CVD
+        # --- Flow: стакан и CVD. Порог имбаленса — по окну живости:
+        # стена могла быть съедена самим откатом к моменту проверки
         imbalance = flow.get("imbalance")
         cvd = flow.get("cvd_30m")
         imb_min = cfg.get("orderbook_imbalance_min", 1.8)
-        if imbalance is None or cvd is None:
-            return None
-        if direction == "LONG" and not (imbalance >= imb_min and cvd > 0):
-            return None
-        if direction == "SHORT" and not (imbalance <= 1 / imb_min and cvd < 0):
+        if direction == "LONG":
+            imb_gate = flow.get("imb_window_max", imbalance)
+            flow_ok = (imb_gate is not None and imb_gate >= imb_min
+                       and cvd is not None and cvd > 0)
+        else:
+            imb_gate = flow.get("imb_window_min", imbalance)
+            flow_ok = (imb_gate is not None and imb_gate <= 1 / imb_min
+                       and cvd is not None and cvd < 0)
+        if not flow_ok:
             return None
 
         atr = float(h1["atr"])
@@ -337,7 +401,7 @@ class SignalGenerator:
         confidence = self._confidence(
             base=0.6,
             adx=float(d1["adx"]), direction=direction,
-            imbalance=imbalance, cvd_positive=(cvd > 0) == (direction == "LONG"),
+            imbalance=imb_gate, cvd_positive=(cvd > 0) == (direction == "LONG"),
             rsi_h1=float(h1["rsi"]), direction_long=direction == "LONG",
         )
         return {
@@ -531,15 +595,13 @@ class SignalGenerator:
         if not retest:
             return None
 
-        # --- Flow
+        # --- Flow. Ретест съедает стену у уровня по определению (откат и есть
+        # покупатель бидов), поэтому доказательство потока — знак cvd-агрегата
+        # за 30 минут + rejection-свеча M15 выше; имбаленс идёт в confidence
         imbalance = flow.get("imbalance")
         cvd = flow.get("cvd_30m")
-        imb_min = cfg.get("m15_orderbook_imbalance_min", 2.0)
-        if imbalance is None or cvd is None:
-            return None
-        if direction == "LONG" and not (imbalance >= imb_min and cvd > 0):
-            return None
-        if direction == "SHORT" and not (imbalance <= 1 / imb_min and cvd < 0):
+        if cvd is None or (direction == "LONG" and cvd <= 0) \
+                or (direction == "SHORT" and cvd >= 0):
             return None
 
         atr = float(h1["atr"])

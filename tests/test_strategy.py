@@ -1,5 +1,8 @@
 """Unit-тесты: LevelDetector, SignalFilters, RiskManager, OrderbookAnalyzer."""
 
+import time
+from collections import deque
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -505,3 +508,54 @@ class TestRiskManager:
     def test_trailing_stop_price_direction(self) -> None:
         assert RiskManager.trailing_stop_price(110.0, 2.0, "LONG") == pytest.approx(108.0)
         assert RiskManager.trailing_stop_price(90.0, 2.0, "SHORT") == pytest.approx(92.0)
+
+
+# ------------------------------------------------------ flow liveness window
+def _flow_generator(flow_window_minutes: float = 15):
+    """SignalGenerator с минимальным конфигом (без БД/Redis)."""
+    from strategy.signal_generator import SignalGenerator
+
+    return SignalGenerator(None, None, {
+        "filters": {}, "risk_management": {}, "levels": {},
+        "signal": {"flow_window_minutes": flow_window_minutes},
+    })
+
+
+class TestFlowWindow:
+    """Окно живости имбаленса: _record_flow/_windowed_imb."""
+
+    def test_window_extremums_include_history_and_current(self) -> None:
+        gen = _flow_generator(15)
+        hist = gen._flow_history.setdefault("X", deque(maxlen=60))
+        hist.append((time.time() - 300, 4.0))  # стена 5 минут назад
+        assert gen._windowed_imb("X", 0.5) == (0.5, 4.0)
+
+    def test_stale_entries_excluded(self) -> None:
+        gen = _flow_generator(15)
+        hist = gen._flow_history.setdefault("X", deque(maxlen=60))
+        hist.append((time.time() - 16 * 60, 9.0))  # старше окна
+        assert gen._windowed_imb("X", 0.5) == (0.5, 0.5)
+
+    def test_none_imbalance_not_recorded(self) -> None:
+        gen = _flow_generator(15)
+        gen._record_flow("X", {"imbalance": None})  # деградированный стакан
+        assert "X" not in gen._flow_history
+
+    def test_zero_window_uses_snapshot_only(self) -> None:
+        gen = _flow_generator(0)  # kill-switch: старое поведение
+        gen._record_flow("X", {"imbalance": 3.0})
+        assert gen._windowed_imb("X", 1.0) == (1.0, 1.0)
+
+    def test_empty_history_no_snapshot(self) -> None:
+        gen = _flow_generator(15)
+        assert gen._windowed_imb("X", None) == (None, None)
+
+    def test_confidence_tolerates_none_imbalance(self) -> None:
+        from strategy.signal_generator import SignalGenerator
+
+        score = SignalGenerator._confidence(
+            base=0.6, adx=30.0, direction="LONG", imbalance=None,
+            cvd_positive=True, rsi_h1=50.0, direction_long=True,
+        )
+        # 0.6 + 0.05 (adx) + 0.07 (cvd) + 0.05 (rsi); бонус имбаленса не начислен
+        assert score == 0.77

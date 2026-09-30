@@ -315,12 +315,16 @@ class TelegramNotifier:
             age = s.get("book_age")
             age_s = f"{age:.0f}s" if age is not None else "—"
             cd = " ⏳" if s.get("cooldown") else ""
+            # Порог имбаленса — по окну живости (синхронно с гейтом сетапа
+            # trend_pullback), а не по мгновенному снапшоту
+            imb_vals = [v for v in (s.get("imb_window_max"), imb) if v is not None]
+            imb_ready = bool(imb_vals) and max(imb_vals) >= 1.8
             if s.get("in_position"):
                 # Строка заморожена с последнего скана до закрытия позиции:
                 # ⚡ и счётчик ready по ней — иллюзия, метрики не пересчитываются
                 mark = "📍"
             elif (s["trend"] == "uptrend" and s["adx"] > 25 and s["vol_ok"]
-                    and s["time_ok"] and imb is not None and imb >= 1.8
+                    and s["time_ok"] and imb_ready
                     and cvd is not None and cvd > 0):
                 # Полный набор пре-условий LONG-сетапа (тренд+ADX+фильтры+поток)
                 ready += 1

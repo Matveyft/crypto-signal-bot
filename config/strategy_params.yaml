@@ -42,6 +42,7 @@ signal:
   cooldown_minutes: 60             # не сигналим тот же символ чаще, чем раз в N минут
   limit_offset_pct: 0.15           # лимитка на столько % лучше текущей цены
   limit_ttl_minutes: 30            # неисполненная лимитка отменяется через N минут
+  flow_window_minutes: 15          # окно живости imb-стены; 0 = только текущий снапшот
 
 levels:
   swing_order: 5
