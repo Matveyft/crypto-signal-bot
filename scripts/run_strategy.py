@@ -304,12 +304,15 @@ class StrategyRunner:
             if price <= pos["stop"]:
                 exit_price, status = price, "stopped"
             elif price >= pos["target"]:
-                exit_price, status = price, "target"
+                # TP-лимит исполняется ровно по цене уровня: текущая цена выше
+                # лишь потому, что трекер опоздал на интервал скана — проскок
+                # между проверками не наш профит (стопы, наоборот, по рынку)
+                exit_price, status = pos["target"], "target"
         else:
             if price >= pos["stop"]:
                 exit_price, status = price, "stopped"
             elif price <= pos["target"]:
-                exit_price, status = price, "target"
+                exit_price, status = pos["target"], "target"
 
         if exit_price is not None:
             pnl_pct = (exit_price - pos["entry"]) / pos["entry"] * 100
