@@ -1,11 +1,17 @@
 # Торгуемые пары — USDT perpetual futures на Bybit.
-# Активный набор (2026-09-27): фокус на 4 монетах.
-# Возврат остальных: добавьте строку и запустите u.sh.
+# Активный набор (2026-10-04): расширение воронки до 10 монет.
+# Возврат остальных: добавьте строку, прогоните load_historical и запустите u.sh.
 symbols:
   - BTC/USDT:USDT
   - ETH/USDT:USDT
   - SOL/USDT:USDT
   - XRP/USDT:USDT
+  - ADA/USDT:USDT
+  - BNB/USDT:USDT
+  - ZEC/USDT:USDT
+  - HYPE/USDT:USDT
+  - DOGE/USDT:USDT
+  - ARB/USDT:USDT
 
 timeframes:
   base: "1m"          # собирается с WebSocket
