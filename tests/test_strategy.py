@@ -559,3 +559,111 @@ class TestFlowWindow:
         )
         # 0.6 + 0.05 (adx) + 0.07 (cvd) + 0.05 (rsi); бонус имбаленса не начислен
         assert score == 0.77
+
+
+# --------------------------------------------------- h4_correction_short tests
+def _h4cs_generator(**setup_overrides: dict):
+    """SignalGenerator с конфигом только сетапа E (без БД/Redis)."""
+    from strategy.signal_generator import SignalGenerator
+
+    return SignalGenerator(None, None, {
+        "filters": {}, "risk_management": {}, "levels": {}, "signal": {},
+        "h4_correction_short": setup_overrides,
+    })
+
+
+def _h4cs_d1(mode: str = "up") -> pd.DataFrame:
+    """D1-фрейм с колонками detect_trend: ema_50, ema_200, adx, close."""
+    n = 30
+    if mode == "up":  # аптренд: close > ema50 > ema200
+        close = np.linspace(200, 220, n)
+        ema50, ema200, adx = close - 5.0, np.full(n, 150.0), np.full(n, 30.0)
+    elif mode == "down":  # подтверждённый даунтренд (территория сетапа A)
+        close = np.linspace(220, 200, n)
+        ema50, ema200, adx = close + 5.0, np.full(n, 250.0), np.full(n, 30.0)
+    else:  # sideways с close ниже EMA200: фаза роста сломана
+        close = np.full(n, 120.0)
+        ema50, ema200, adx = np.full(n, 100.0), np.full(n, 150.0), np.full(n, 30.0)
+    return pd.DataFrame(
+        {"close": close, "ema_50": ema50, "ema_200": ema200, "adx": adx}
+    )
+
+
+def _h4cs_h4(mode: str = "down") -> pd.DataFrame:
+    """H4-фрейм: даунтренд (для входа) или sideways со слабым ADX."""
+    n = 30
+    close, high, low = np.full(n, 100.0), np.full(n, 101.0), np.full(n, 99.0)
+    if mode == "down":
+        ema50, adx = np.linspace(160, 150, n), np.full(n, 30.0)
+    else:  # плоская EMA50 + ADX 15 — detect_trend вернёт sideways
+        ema50, adx = np.full(n, 150.0), np.full(n, 15.0)
+    return pd.DataFrame({
+        "close": close, "high": high, "low": low,
+        "ema_50": ema50, "ema_200": np.full(n, 200.0), "adx": adx,
+    })
+
+
+def _h4cs_h1() -> pd.DataFrame:
+    """H1: RSI<60, close<EMA20, гистограмма падает, ATR=2."""
+    return pd.DataFrame({
+        "close": [100.0, 100.0], "rsi": [50.0, 45.0],
+        "ema_20": [101.0, 101.0],
+        "macd_histogram": [-0.5, -1.0], "atr": [2.0, 2.0],
+    })
+
+
+def _h4cs_m15() -> pd.DataFrame:
+    """M15: зелёная -2, bearish engulfing -1 с close ниже локального лоу 97.5."""
+    return pd.DataFrame({
+        "open": [98.0, 98.0, 98.0, 98.0, 97.9, 98.6],
+        "high": [99.5, 99.5, 99.5, 99.5, 98.2, 98.7],
+        "low": [97.5, 98.5, 97.5, 98.0, 97.7, 97.3],
+        "close": [98.2, 98.2, 98.2, 98.2, 98.1, 97.4],
+    })
+
+
+def _h4cs_call(gen, d1_mode: str = "up", h4_mode: str = "down"):
+    """Вызов сетапа E с проходным набором данных (меняем режимы D1/H4)."""
+    return gen.h4_correction_short_setup(
+        df_d1=_h4cs_d1(d1_mode), df_h4=_h4cs_h4(h4_mode),
+        df_h1=_h4cs_h1(), df_m15=_h4cs_m15(),
+        levels={"support": [90.0], "resistance": [100.2], "poc": None},
+        flow={"imbalance": 0.5, "imb_window_min": 0.4, "cvd_30m": -0.0005},
+        live_price=100.0,
+    )
+
+
+class TestH4CorrectionShort:
+    """Сетап E: коррекционный шорт внутри D1-фазы роста."""
+
+    def test_fires_on_h4_downtrend_in_bull_phase(self) -> None:
+        sig = _h4cs_call(_h4cs_generator())
+        assert sig is not None
+        assert sig["type"] == "SHORT"
+        assert sig["strategy"] == "h4_correction_short"
+        # свинг-стоп слишком близко (0.8 < 0.5 ATR) -> ATR-стоп 1.5*2
+        assert sig["stop"] == pytest.approx(103.0)
+        # жёсткие цели: T1 = 0.75*1.2*R, T2 = 1.2R при R = 3
+        assert sig["targets"][0] == pytest.approx(97.3)
+        assert sig["targets"][1] == pytest.approx(96.4)
+        # 0.5 + 0.05 (adx30) + 0.07 (cvd) + 0.05 (rsi 45)
+        assert sig["confidence"] == pytest.approx(0.67)
+
+    def test_skips_when_d1_confirmed_downtrend(self) -> None:
+        # полноценный даунтренд — там шортит сетап A, E не дублирует
+        assert _h4cs_call(_h4cs_generator(), d1_mode="down") is None
+
+    def test_skips_when_d1_below_ema200(self) -> None:
+        # close < EMA200: фаза роста сломана — гейт по умолчанию режет
+        assert _h4cs_call(_h4cs_generator(), d1_mode="below200") is None
+
+    def test_ema200_gate_can_be_disabled(self) -> None:
+        gen = _h4cs_generator(d1_close_above_ema200=False)
+        assert _h4cs_call(gen, d1_mode="below200") is not None
+
+    def test_skips_when_h4_not_downtrend(self) -> None:
+        # плоская EMA50 и ADX 15 — H4-тренда нет, шортить нечего
+        assert _h4cs_call(_h4cs_generator(), h4_mode="sideways") is None
+
+    def test_disabled_kills_setup(self) -> None:
+        assert _h4cs_call(_h4cs_generator(enabled=False)) is None

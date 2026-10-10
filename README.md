@@ -14,7 +14,7 @@ Bybit WS/REST ──► collectors ──► TimescaleDB (история) + Redi
                     features (индикаторы, S/R, orderbook, regime)
                                      │
                                      ▼
-              strategy (3 сетапа + фильтры + риск-менеджмент)
+              strategy (4 сетапа + фильтры + риск-менеджмент)
                                      │
                                      ▼
                   run_strategy (сигналы в БД, трекинг позиций)
@@ -22,6 +22,7 @@ Bybit WS/REST ──► collectors ──► TimescaleDB (история) + Redi
 
 **Сетапы:**
 - `trend_pullback` — вход по тренду D1 на откате к поддержке (Fib/EMA50/POC)
+- `h4_correction_short` — коррекционный шорт: H4-даунтренд внутри D1-фазы роста
 - `mean_reversion` — разворот из RSI/BB-экстремума при негативном funding
 - `breakout_retest` — пробой H4-консолидации на объёме + успешный ретест
 

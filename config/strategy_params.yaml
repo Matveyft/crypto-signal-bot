@@ -13,6 +13,15 @@ trend_pullback:
   cvd_window_minutes: 30
   fib_pullback_zone: [0.382, 0.5]
 
+h4_correction_short:
+  enabled: true                   # kill-switch сетапа целиком
+  h4_adx_min: 25                  # сила H4-даунтренда
+  d1_close_above_ema200: true     # фаза роста intact: D1 close > EMA200
+  h1_rsi_min: 40                  # RSI H1 < 100 - 40 = 60
+  m15_lookback_bars: 4
+  orderbook_imbalance_min: 1.8
+  risk_reward_ratio: 1.2          # жёсткие цели: T1 ~0.9R, T2 1.2R (трейлинг с 1R)
+
 mean_reversion:
   h1_rsi_max: 30
   h1_rsi_min: 70                   # для SHORT: RSI > 70

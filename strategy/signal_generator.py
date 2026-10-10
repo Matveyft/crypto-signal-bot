@@ -1,9 +1,11 @@
-"""Генератор сигналов: 3 сетапа, фильтры, confidence score.
+"""Генератор сигналов: 4 сетапа, фильтры, confidence score.
 
 Сетапы:
-    A) trend_pullback   — вход по тренду на откате к поддержке
-    B) mean_reversion   — разворот из перекупленности/перепроданности
-    C) breakout_retest  — пробой консолидации и ретест уровня
+    A) trend_pullback      — вход по тренду на откате к поддержке
+    B) mean_reversion      — разворот из перекупленности/перепроданности
+    C) breakout_retest     — пробой консолидации и ретест уровня
+    E) h4_correction_short — коррекционный шорт: H4-даунтренд внутри
+                            D1-фазы роста (D — отвергнутая дивергенция)
 """
 
 from __future__ import annotations
@@ -114,6 +116,7 @@ class SignalGenerator:
             candidates = []
             for setup_fn, name in (
                 (self.trend_pullback_setup, "trend_pullback"),
+                (self.h4_correction_short_setup, "h4_correction_short"),
                 (self.mean_reversion_setup, "mean_reversion"),
                 (self.breakout_retest_setup, "breakout_retest"),
             ):
@@ -410,6 +413,107 @@ class SignalGenerator:
             "confidence": confidence,
             "reason": f"D1 {d1_trend} ADX={d1['adx']:.0f}, H4 pullback to zone, "
                       f"H1 momentum ok, M15 pattern, imb={imbalance:.2f} cvd30={cvd:.4f}",
+        }
+
+    # ---------------------------------------------- setup E: h4 correction short
+    def h4_correction_short_setup(
+        self,
+        df_d1: pd.DataFrame,
+        df_h4: pd.DataFrame,
+        df_h1: pd.DataFrame,
+        df_m15: pd.DataFrame,
+        levels: dict[str, Any],
+        flow: dict[str, Any],
+        funding: dict[str, Any] | None = None,
+        live_price: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Сетап E: коррекционный SHORT — H4-даунтренд внутри D1-фазы роста.
+
+        В бычьем рынке сетап A шортов не даёт (нужен D1-даунтренд), а
+        коррекции H4 — регулярное явление. Условия: D1 НЕ в даунтренде
+        (аптренд/сайдвей, close > EMA200 — фаза роста intact); [H4]
+        подтверждённый даунтренд ADX>=25; откат к зоне сопротивления;
+        далее механика входа A-SHORT (H1 моментум, M15 паттерн, flow),
+        но confidence урезан (base 0.5) и цели жёстче (RR 1.2): сделка
+        на часы, не на дни — в бычьей фазе коррекции откупают быстро.
+        Trailing с 1R переводит стоп в безубыток раньше тейка.
+
+        Returns:
+            Сигнал dict или None.
+        """
+        cfg = self.params.get("h4_correction_short", {})
+        if not cfg.get("enabled", True):
+            return None
+        h1, m15 = df_h1.iloc[-1], df_m15.iloc[-1]
+        d1, h4 = df_d1.iloc[-1], df_h4.iloc[-1]
+        price = live_price or float(h1["close"])
+
+        # --- D1: фаза роста intact. Подтверждённый даунтренд — территория
+        # сетапа A (полноценный шорт по тренду), там не дублируем
+        if self.regime.detect_trend(df_d1) == "downtrend":
+            return None
+        if (cfg.get("d1_close_above_ema200", True)
+                and float(d1["close"]) < float(d1["ema_200"])):
+            return None
+
+        # --- H4: подтверждённый даунтренд (наклон EMA50 вниз + ADX)
+        if self.regime.detect_trend(
+            df_h4, adx_threshold=cfg.get("h4_adx_min", 25)
+        ) != "downtrend":
+            return None
+
+        # --- H4: откат вверх в зону сопротивления — точка входа
+        if not self._in_pullback_zone_short(df_h4, levels, price):
+            return None
+
+        # --- H1: моментум вниз (как у A-SHORT)
+        h1_prev = df_h1.iloc[-2]
+        momentum = (
+            float(h1["rsi"]) < 100 - cfg.get("h1_rsi_min", 40)
+            and float(h1["close"]) < float(h1["ema_20"])
+            and float(h1["macd_histogram"]) < float(h1_prev["macd_histogram"])
+        )
+        if not momentum:
+            return None
+
+        # --- M15: bearish-паттерн и пробой локального лоу
+        lookback = cfg.get("m15_lookback_bars", 4)
+        local_low = float(df_m15["low"].iloc[-lookback - 1 : -1].min())
+        confirmed = (
+            self._bearish_pattern(df_m15) and float(m15["close"]) < local_low
+        )
+        if not confirmed:
+            return None
+
+        # --- Flow: как у A-SHORT, имбаленс по окну живости
+        imbalance = flow.get("imbalance")
+        cvd = flow.get("cvd_30m")
+        imb_min = cfg.get("orderbook_imbalance_min", 1.8)
+        imb_gate = flow.get("imb_window_min", imbalance)
+        flow_ok = (imb_gate is not None and imb_gate <= 1 / imb_min
+                   and cvd is not None and cvd < 0)
+        if not flow_ok:
+            return None
+
+        atr = float(h1["atr"])
+        swing = levels["resistance"][0] if levels["resistance"] else None
+        stop = self.risk.calculate_stop_loss(price, atr, "SHORT", swing)
+        t1, t2 = self.risk.calculate_take_profit(
+            price, stop, "SHORT", levels["support"],
+            risk_reward=float(cfg.get("risk_reward_ratio", 1.2)),
+        )
+        confidence = self._confidence(
+            base=0.5, adx=float(h4["adx"]), direction="SHORT",
+            imbalance=imb_gate, cvd_positive=cvd < 0,
+            rsi_h1=float(h1["rsi"]), direction_long=False,
+        )
+        return {
+            "type": "SHORT", "strategy": "h4_correction_short",
+            "entry": price, "stop": stop, "targets": [t1, t2],
+            "confidence": confidence,
+            "reason": f"D1 bull-phase, H4 downtrend ADX={h4['adx']:.0f}, "
+                      f"H4 pullback to resistance, H1 momentum down, "
+                      f"M15 bearish break, imb={imb_gate:.2f} cvd30={cvd:.4f}",
         }
 
     # --------------------------------------------------- setup B: mean reversion
