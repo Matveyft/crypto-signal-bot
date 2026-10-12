@@ -158,16 +158,16 @@ class TelegramNotifier:
         sym = pos["symbol"]
         side = pos["side"]
         if event == "filled":
-            return (f"✅ <b>{sym} {side}: лимит исполнен</b>\n"
+            return (f"⚡ <b>{sym} {side}: лимит исполнен</b>\n"
                     f"Вход: <code>{pos['entry']:.6g}</code> — позиция открыта")
         if event == "cancelled":
             return (f"🔌 <b>{sym} {side}: лимит не исполнен</b>\n"
                     f"Сигнал отменён (30 мин). Цена ушла без нас")
         if event == "breakeven":
-            return (f"🔄 <b>{sym} {side}: 1:1 пройдено</b>\n"
+            return (f"🟢 <b>{sym} {side}: TP1 пройдено</b>\n"
                     f"Стоп перенесён в безубыток: <code>{pos['entry']:.6g}</code>")
         if event == "tp":
-            return (f"🏁 <b>{sym} {side}: закрыт по TP</b>\n"
+            return (f"🟢🟢 <b>{sym} {side}: TP2 пройдено</b>\n"
                     f"Выход: <code>{pos.get('exit_price', 0):.6g}</code>"
                     f" ({pos.get('pnl_pct', 0):+.2f}%)")
         if event == "sl":
