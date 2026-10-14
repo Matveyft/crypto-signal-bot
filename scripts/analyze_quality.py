@@ -137,6 +137,35 @@ def after_stop(pos: dict, candles: list, horizon_h: float = 12.0) -> dict:
     return {"over_r": max(over, 0.0), "tp_min": tp_min}
 
 
+def first_passage(pos: dict, candles: list, horizon_h: float = 12.0) -> str | None:
+    """После стопа: что раньше — цель или зеркальный уровень в противоположную сторону.
+
+    Нулевая модель: из точки стопа случайное блуждание доходит до любого из
+    двух равноудалённых уровней с равной вероятностью. Если цель раньше
+    зеркала заметно чаще 50% — «слив за стоп, потом к цели» не случайность.
+    В одной свече касание обоих считаем зеркалом (консервативно).
+    """
+    rep = pos["rep"]
+    i0 = rep.get("stop_i")
+    if i0 is None or not candles or pos["target"] is None:
+        return None
+    stop0 = pos["sig_stop"] if pos["sig_stop"] is not None else pos["cur_stop"]
+    target = pos["target"]
+    i1 = min(len(candles), i0 + int(horizon_h * 60))
+    for c in candles[i0:i1]:
+        if pos["side"] == "LONG":
+            if c[2] <= stop0 - (target - stop0):
+                return "mirror"
+            if c[1] >= target:
+                return "tp"
+        else:
+            if c[1] >= stop0 + (stop0 - target):
+                return "mirror"
+            if c[2] <= target:
+                return "tp"
+    return None
+
+
 def missed_winners(pos: dict, candles: list, horizon_min: int = 120) -> bool:
     """TTL-отмена: дошла бы цена до цели за окно жизни + horizon.
 
@@ -231,6 +260,11 @@ async def main() -> None:
                 k = sum(1 for _, s in post
                         if s["tp_min"] is not None and s["tp_min"] <= hrs * 60)
                 print(f"  дошли до цели после стопа за {hrs}ч: {k}/{len(post)}")
+            sym = [first_passage(p, candles.get(p["symbol"], [])) for p, _ in post]
+            hits = [s for s in sym if s]
+            if hits:
+                print(f"КОНТРОЛЬ СЛУЧАЙНОСТИ: цель раньше зеркала"
+                      f" {hits.count('tp')}/{len(hits)} (50% = чистая случайность)")
 
     canc = [p for p in posis if p["status"] == "cancelled"]
     if canc:
