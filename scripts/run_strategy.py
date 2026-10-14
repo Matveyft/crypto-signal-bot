@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import signal as sig_module
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import text
@@ -124,9 +124,12 @@ class StrategyRunner:
                 signal = await self.generator.generate_signals(symbol)
                 if signal is None or signal["confidence"] < self.min_confidence:
                     continue
+                # Размер считаем от лимитки: на исполнении теряем ровно
+                # risk_per_trade_pct (расчёт от рыночного входа занижал риск
+                # на величину offset — $18.9 вместо $25 при offset 0.15%)
                 signal["position_size"] = self.generator.risk.calculate_position_size(
                     account_balance=self.account_balance,
-                    entry_price=signal["entry"],
+                    entry_price=signal.get("limit_price") or signal["entry"],
                     stop_loss=signal["stop"],
                 )
                 # Cooldown включаем только после успешной записи: сбой БД
@@ -228,7 +231,7 @@ class StrategyRunner:
             ))).mappings().all()
 
         for pos in rows:
-            win = await self._get_price_window(pos["symbol"])
+            win = await self._get_price_window(pos["symbol"], pos["opened_at"])
             if win is None:
                 continue
             if pos["status"] == "pending":
@@ -272,29 +275,36 @@ class StrategyRunner:
                 self.notifier.format_lifecycle(pos, "cancelled")),
                 f"cancelled {pos['symbol']}")
 
-    async def _get_price_window(self, symbol: str) -> dict[str, float] | None:
-        """Окно экстремумов: текущая 1m-свеча (Redis) + последняя закрытая (БД).
+    async def _get_price_window(
+        self, symbol: str, since: datetime
+    ) -> dict[str, float] | None:
+        """Окно экстремумов: текущая 1m-свеча (Redis) + закрытые после `since`.
 
         Проверка одной last-price пропускала хвосты свечей между сканами —
         тейки «недосчитывались» (реплей по свечам дал TP 8 против 3 у трекера).
-        Теперь уровни проверяются против high/low объединённого окна.
+        Уровни проверяются против high/low объединённого окна; свечи старше
+        минуты создания позиции отсечены — лимитка не может «исполниться»
+        хвостом, который был до сигнала (минус свеча самого сигнала остаётся).
 
         Args:
             symbol: Символ ccxt.
+            since: Момент создания позиции (opened_at).
 
         Returns:
             dict {'high', 'low', 'close'} или None, если данных нет.
         """
         candle = await self._cache.get_candle(symbol, "1m")
-        df = await self._db.fetch_ohlcv(symbol, "1m", limit=1)
+        df = await self._db.fetch_ohlcv(symbol, "1m", limit=2)
+        if not df.empty:
+            df = df[df["timestamp"] >= since - timedelta(minutes=1)]
         highs, lows, close = [], [], None
         if candle is not None:
             highs.append(float(candle["high"]))
             lows.append(float(candle["low"]))
             close = float(candle["close"])
         if not df.empty:
-            highs.append(float(df["high"].iloc[-1]))
-            lows.append(float(df["low"].iloc[-1]))
+            highs.append(float(df["high"].max()))
+            lows.append(float(df["low"].min()))
             close = close if close is not None else float(df["close"].iloc[-1])
         if close is None:
             return None

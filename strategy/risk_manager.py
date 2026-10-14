@@ -86,17 +86,20 @@ class RiskManager:
         risk = abs(entry_price - stop_loss)
         if side == "LONG":
             tp1, tp2 = entry_price + 0.75 * rr * risk, entry_price + rr * risk
-            # TP1 фиксируем перед ближайшим сопротивлением
+            # TP1 фиксируем перед ближайшим сопротивлением ДО формульного TP1
+            # (окно сужено: уровень за TP1 не должен уводить цель дальше)
             if resistance_levels:
-                ahead = [lv for lv in resistance_levels if entry_price < lv < tp1 + risk]
+                ahead = [lv for lv in resistance_levels if entry_price < lv < tp1]
                 if ahead:
                     tp1 = max(min(ahead) - 0.1 * risk, entry_price + 0.5 * risk)
+            tp1 = min(tp1, tp2)  # инвариант: частичная цель не дальше финальной
         else:
             tp1, tp2 = entry_price - 0.75 * rr * risk, entry_price - rr * risk
             if resistance_levels:
-                ahead = [lv for lv in resistance_levels if tp2 - risk < lv < entry_price]
+                ahead = [lv for lv in resistance_levels if tp1 < lv < entry_price]
                 if ahead:
                     tp1 = min(max(ahead) + 0.1 * risk, entry_price - 0.5 * risk)
+            tp1 = max(tp1, tp2)  # инвариант: частичная цель не дальше финальной
         return round(tp1, 8), round(tp2, 8)
 
     # --------------------------------------------------------- position size
