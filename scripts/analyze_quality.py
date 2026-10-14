@@ -48,7 +48,8 @@ def _f(v: float | None, spec: str = ".2f") -> str:
 def replay(pos: dict, candles: list) -> dict:
     """Прогон одной позиции по свечам: fill -> стоп/тейк, MFE/MAE в R."""
     out: dict = {"filled": False, "status": "no_data", "exit": None, "r": None,
-                 "mfe": None, "mae": None, "fill_min": None, "exit_min": None}
+                 "mfe": None, "mae": None, "fill_min": None, "exit_min": None,
+                 "stop_i": None}
     side = pos["side"]
     limit = pos["limit_price"] or pos["entry"]
     stop0 = pos["sig_stop"] if pos["sig_stop"] is not None else pos["cur_stop"]
@@ -80,7 +81,7 @@ def replay(pos: dict, candles: list) -> dict:
         if is_long:
             fav, adv = max(fav, hi - limit), max(adv, limit - lo)
             if lo <= stop0:              # стоп приоритетен внутри свечи
-                out.update(status="sl", exit=stop0, r=-1.0)
+                out.update(status="sl", exit=stop0, r=-1.0, stop_i=i)
                 out["exit_min"] = (candles[i][0] - candles[fill_i][0]).total_seconds() / 60
                 break
             if hi >= target:
@@ -91,7 +92,7 @@ def replay(pos: dict, candles: list) -> dict:
         else:
             fav, adv = max(fav, limit - lo), max(adv, hi - limit)
             if hi >= stop0:
-                out.update(status="sl", exit=stop0, r=-1.0)
+                out.update(status="sl", exit=stop0, r=-1.0, stop_i=i)
                 out["exit_min"] = (candles[i][0] - candles[fill_i][0]).total_seconds() / 60
                 break
             if lo <= target:
@@ -103,6 +104,37 @@ def replay(pos: dict, candles: list) -> dict:
         out["status"] = "running"
     out["mfe"], out["mae"] = fav / risk, adv / risk
     return out
+
+
+def after_stop(pos: dict, candles: list, horizon_h: float = 12.0) -> dict:
+    """Что происходит ПОСЛЕ сработавшего стопа: перелёт за стоп и выход к цели.
+
+    Гипотеза пользователя: цена стукается в SL, идёт ещё немного (свип),
+    а затем доходит до цели — т.е. стоп стоит на пути финального слива.
+    Возвращает перелёт за стоп в R и время достижения цели после стопа.
+    """
+    rep = pos["rep"]
+    i0 = rep.get("stop_i")
+    if i0 is None or not candles:
+        return {}
+    stop0 = pos["sig_stop"] if pos["sig_stop"] is not None else pos["cur_stop"]
+    risk = abs((pos["limit_price"] or pos["entry"]) - stop0)
+    target = pos["target"]
+    if risk <= 0 or target is None:
+        return {}
+    i1 = min(len(candles), i0 + int(horizon_h * 60))
+    win = candles[i0:i1]
+    if not win:
+        return {}
+    if pos["side"] == "LONG":
+        over = (stop0 - min(c[2] for c in win)) / risk
+        tp_i = next((k for k, c in enumerate(win) if c[1] >= target), None)
+    else:
+        over = (max(c[1] for c in win) - stop0) / risk
+        tp_i = next((k for k, c in enumerate(win) if c[2] <= target), None)
+    tp_min = None if tp_i is None else \
+        (win[tp_i][0] - candles[i0][0]).total_seconds() / 60
+    return {"over_r": max(over, 0.0), "tp_min": tp_min}
 
 
 def missed_winners(pos: dict, candles: list, horizon_min: int = 120) -> bool:
@@ -189,6 +221,16 @@ async def main() -> None:
         never = sum(1 for p in losers if (p["rep"]["mfe"] or 0) < 0.3)
         print(f"\nполные стопы: {len(losers)} | из них быстрее 30 мин: {fast}"
               f" | не увидели даже +0.3R: {never}")
+        post = [(p, after_stop(p, candles.get(p["symbol"], []))) for p in losers]
+        post = [(p, s) for p, s in post if s]
+        if post:
+            overs = [s["over_r"] for _, s in post]
+            print(f"ПОСЛЕ СТОПА: перелёт за стоп медиана {_f(_med(overs))}R"
+                  f" | макс {max(overs):.2f}R")
+            for hrs in (2, 6, 12):
+                k = sum(1 for _, s in post
+                        if s["tp_min"] is not None and s["tp_min"] <= hrs * 60)
+                print(f"  дошли до цели после стопа за {hrs}ч: {k}/{len(post)}")
 
     canc = [p for p in posis if p["status"] == "cancelled"]
     if canc:
