@@ -228,27 +228,27 @@ class StrategyRunner:
             ))).mappings().all()
 
         for pos in rows:
-            price = await self._get_last_price(pos["symbol"])
-            if price is None:
+            win = await self._get_price_window(pos["symbol"])
+            if win is None:
                 continue
             if pos["status"] == "pending":
-                await self._check_pending(dict(pos), price)
+                await self._check_pending(dict(pos), win)
             else:
-                await self._check_position(dict(pos), price)
+                await self._check_position(dict(pos), win)
 
-    async def _check_pending(self, pos: dict[str, Any], price: float) -> None:
+    async def _check_pending(self, pos: dict[str, Any], win: dict[str, float]) -> None:
         """Pending-позиция: ждём касания лимитки или отменяем по таймауту.
 
         Args:
             pos: Строка позиции со статусом pending.
-            price: Текущая live-цена.
+            win: Окно цены {'high', 'low', 'close'}.
         """
         limit = pos["limit_price"] or pos["entry"]
         now = datetime.now(tz=timezone.utc)
         age_min = (now - pos["opened_at"]).total_seconds() / 60
 
-        filled = (pos["side"] == "LONG" and price <= limit) or \
-                 (pos["side"] == "SHORT" and price >= limit)
+        filled = (pos["side"] == "LONG" and win["low"] <= limit) or \
+                 (pos["side"] == "SHORT" and win["high"] >= limit)
         if filled:
             async with self._db.engine.begin() as conn:
                 await conn.execute(text(
@@ -272,46 +272,59 @@ class StrategyRunner:
                 self.notifier.format_lifecycle(pos, "cancelled")),
                 f"cancelled {pos['symbol']}")
 
-    async def _get_last_price(self, symbol: str) -> float | None:
-        """Последняя цена: из Redis (текущая свеча) или БД (закрытая).
+    async def _get_price_window(self, symbol: str) -> dict[str, float] | None:
+        """Окно экстремумов: текущая 1m-свеча (Redis) + последняя закрытая (БД).
+
+        Проверка одной last-price пропускала хвосты свечей между сканами —
+        тейки «недосчитывались» (реплей по свечам дал TP 8 против 3 у трекера).
+        Теперь уровни проверяются против high/low объединённого окна.
 
         Args:
             symbol: Символ ccxt.
 
         Returns:
-            Цена close или None.
+            dict {'high', 'low', 'close'} или None, если данных нет.
         """
         candle = await self._cache.get_candle(symbol, "1m")
-        if candle is not None:
-            return float(candle["close"])
         df = await self._db.fetch_ohlcv(symbol, "1m", limit=1)
-        if df.empty:
+        highs, lows, close = [], [], None
+        if candle is not None:
+            highs.append(float(candle["high"]))
+            lows.append(float(candle["low"]))
+            close = float(candle["close"])
+        if not df.empty:
+            highs.append(float(df["high"].iloc[-1]))
+            lows.append(float(df["low"].iloc[-1]))
+            close = close if close is not None else float(df["close"].iloc[-1])
+        if close is None:
             return None
-        return float(df["close"].iloc[-1])
+        return {"high": max(highs), "low": min(lows), "close": close}
 
-    async def _check_position(self, pos: dict[str, Any], price: float) -> None:
+    async def _check_position(self, pos: dict[str, Any], win: dict[str, float]) -> None:
         """Применяет правила выхода к одной позиции.
+
+        Уровни проверяются против high/low окна; при касании стопа и тейка
+        в одном окне приоритет у стопа (консервативно, синхронно с
+        analyze_quality). Оба выхода исполняются по цене уровня: стоп —
+        рыночный (проскальзывание не моделируем), тейк — лимитный.
 
         Args:
             pos: Строка позиции (id, side, entry, stop, target, trailing_active).
-            price: Текущая цена.
+            win: Окно цены {'high', 'low', 'close'}.
         """
         is_long = pos["side"] == "LONG"
         exit_price: float | None = None
         status = ""
 
         if is_long:
-            if price <= pos["stop"]:
-                exit_price, status = price, "stopped"
-            elif price >= pos["target"]:
-                # TP-лимит исполняется ровно по цене уровня: текущая цена выше
-                # лишь потому, что трекер опоздал на интервал скана — проскок
-                # между проверками не наш профит (стопы, наоборот, по рынку)
+            if win["low"] <= pos["stop"]:
+                exit_price, status = pos["stop"], "stopped"
+            elif win["high"] >= pos["target"]:
                 exit_price, status = pos["target"], "target"
         else:
-            if price >= pos["stop"]:
-                exit_price, status = price, "stopped"
-            elif price <= pos["target"]:
+            if win["high"] >= pos["stop"]:
+                exit_price, status = pos["stop"], "stopped"
+            elif win["low"] <= pos["target"]:
                 exit_price, status = pos["target"], "target"
 
         if exit_price is not None:
@@ -337,7 +350,7 @@ class StrategyRunner:
         # Trailing: при 1:1 переносим стоп в безубыток
         if not pos["trailing_active"]:
             activate = self.generator.risk.should_trail_stop(
-                price, pos["entry"], pos["stop"]
+                win["close"], pos["entry"], pos["stop"]
             )
             if activate:
                 breakeven = pos["entry"]

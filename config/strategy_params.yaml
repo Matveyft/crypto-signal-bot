@@ -20,7 +20,7 @@ h4_correction_short:
   h1_rsi_min: 40                  # RSI H1 < 100 - 40 = 60
   m15_lookback_bars: 4
   orderbook_imbalance_min: 1.8
-  risk_reward_ratio: 1.2          # жёсткие цели: T1 ~0.9R, T2 1.2R (трейлинг с 1R)
+  risk_reward_ratio: 0.9          # RR при стопе 2.0 ATR = прежние абсолютные цели
 
 mean_reversion:
   h1_rsi_max: 30
@@ -40,8 +40,8 @@ breakout:
 
 risk_management:
   risk_per_trade_pct: 0.5          # % от баланса на сделку (депозит 5000 USDT)
-  stop_loss_atr_multiplier: 1.5
-  risk_reward_ratio: 2.0
+  stop_loss_atr_multiplier: 2.0    # шире на ~0.5R: реплей показал перелёт за стоп ~0.2R (макс 0.5R)
+  risk_reward_ratio: 1.5           # RR 1.5 при стопе 2 ATR ~ прежние абсолютные цели (было 2.0 при 1.5 ATR)
   trailing_stop_activation_rr: 1.0
   leverage: 5
 
@@ -50,7 +50,7 @@ signal:
   min_confidence: 0.6
   cooldown_minutes: 60             # не сигналим тот же символ чаще, чем раз в N минут
   limit_offset_pct: 0.15           # лимитка на столько % лучше текущей цены
-  limit_ttl_minutes: 30            # неисполненная лимитка отменяется через N минут
+  limit_ttl_minutes: 120           # 30 мин резали победителей: 4 из 9 TTL-отмен дошли до цели без нас
   flow_window_minutes: 15          # окно живости imb-стены; 0 = только текущий снапшот
 
 levels:
