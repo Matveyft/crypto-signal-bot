@@ -1,4 +1,4 @@
-"""Запуск всех коллекторов: Bybit WS + Funding + Aggregator.
+"""Запуск всех коллекторов: Bybit WS + Funding + Aggregator + Citadel.
 
 Запуск: python -m scripts.run_collector
 Остановка: Ctrl+C или SIGTERM (graceful shutdown).
@@ -9,6 +9,7 @@ import signal
 
 from data_layer.collectors.aggregator import Aggregator
 from data_layer.collectors.bybit_collector import BybitCollector
+from data_layer.collectors.citadel_collector import CitadelCollector
 from data_layer.collectors.funding_collector import FundingCollector
 from data_layer.storage.redis_cache import RedisCache
 from data_layer.storage.timescale_manager import TimescaleManager
@@ -35,6 +36,14 @@ async def main() -> None:
             poll_interval_sec=60,
         ),
     ]
+    # Citadel — теневые сигналы и данные (config/citadel.yaml: enabled).
+    # Ошибка его конфигурации не должна останавливать сбор данных Bybit.
+    try:
+        citadel_cfg = load_config("citadel")
+        if citadel_cfg.get("enabled", True):
+            collectors.append(CitadelCollector(symbols, db, cache, citadel_cfg))
+    except Exception:
+        logger.exception("Citadel collector не запущен: ошибка конфигурации")
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     Float,
     Identity,
@@ -15,6 +17,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -117,3 +120,54 @@ class Position(Base):
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     pnl_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class ShadowSignal(Base):
+    """Теневой сигнал: чужое событие как кандидат сделки.
+
+    Заполняется CitadelCollector. В отличие от signals/positions не создаёт
+    позицию, не блокирует символ и не уходит в Telegram — только запись для
+    отчёта (scripts.analyze_shadow). Стоп и цели посчитаны правилами бота на
+    момент обнаружения; NULL, если цены или ATR в этот момент не было.
+
+    Уникальность (source, strategy, symbol, timeframe, event_time): повтор
+    одного события при перезапуске или сбое записи не дублируется.
+    """
+
+    __tablename__ = "shadow_signals"
+    __table_args__ = (
+        UniqueConstraint(
+            "source", "strategy", "symbol", "timeframe", "event_time",
+            name="uq_shadow_signals_event",
+        ),
+        Index("ix_shadow_signals_strategy_detected", "strategy", "detected_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    source: Mapped[str] = mapped_column(String(20), nullable=False)
+    strategy: Mapped[str] = mapped_column(String(40), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(30), nullable=False)
+    timeframe: Mapped[str] = mapped_column(
+        String(5), nullable=False, default="", server_default=text("''")
+    )
+    event_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    side: Mapped[str] = mapped_column(String(5), nullable=False)
+    detected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    onset: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False,
+                                        server_default=text("false"))
+    entry: Mapped[float | None] = mapped_column(Float, nullable=True)
+    limit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stop: Mapped[float | None] = mapped_column(Float, nullable=True)
+    target1: Mapped[float | None] = mapped_column(Float, nullable=True)
+    target2: Mapped[float | None] = mapped_column(Float, nullable=True)
+    atr: Mapped[float | None] = mapped_column(Float, nullable=True)
+    strength: Mapped[float | None] = mapped_column(Float, nullable=True)
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+
+    def __repr__(self) -> str:
+        return (
+            f"ShadowSignal({self.strategy} {self.symbol} {self.side}"
+            f" {self.event_time} entry={self.entry} stop={self.stop})"
+        )

@@ -11,7 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from data_layer.storage.models import Base, FundingData, OHLCV
+from data_layer.storage.models import Base, FundingData, OHLCV, ShadowSignal
 from data_layer.utils import load_config, setup_logging
 
 logger = setup_logging()
@@ -174,6 +174,27 @@ class TimescaleManager:
             result = await conn.execute(text(query), {"symbol": symbol})
             row = result.mappings().first()
         return dict(row) if row else None
+
+    async def insert_shadow_signals(self, rows: Sequence[dict[str, Any]]) -> int:
+        """Запись теневых сигналов (идемпотентная: повтор события не дублируется).
+
+        Args:
+            rows: Список dict с ключами модели ShadowSignal.
+
+        Returns:
+            Сколько строк добавлено (повторы не считаются).
+
+        Raises:
+            Исключение БД: вызывающий решает, повторять ли запись.
+        """
+        if not rows:
+            return 0
+        stmt = pg_insert(ShadowSignal).values(list(rows)).on_conflict_do_nothing(
+            constraint="uq_shadow_signals_event"
+        )
+        async with self.engine.begin() as conn:
+            result = await conn.execute(stmt)
+        return int(result.rowcount or 0)
 
     async def fetch_ohlcv_since(
         self, symbol: str, timeframe: str, since: datetime

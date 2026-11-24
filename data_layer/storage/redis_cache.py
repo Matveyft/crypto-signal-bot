@@ -5,6 +5,9 @@
     cvd:{symbol}           — суммарный CVD + окна по минутам, TTL 15 мин
     orderbook:{symbol}     — снапшот стакана + метрики, TTL 10 сек
     funding:{symbol}       — последний funding-снапшот, TTL 1 час
+    citadel:{name}         — данные архива Citadel, TTL задаёт коллектор
+                             (alerts, trdr, mark:{symbol}:{tf}, book:{symbol},
+                              status, cursor)
 """
 
 from __future__ import annotations
@@ -141,6 +144,36 @@ class RedisCache:
             dict или None.
         """
         raw = await self._client.get(_key("funding", symbol))
+        return json.loads(raw) if raw else None
+
+    # ---------------------------------------------------------------- citadel
+    async def set_citadel(
+        self, name: str, data: Any, ttl_sec: int | None = None
+    ) -> None:
+        """Сохраняет данные архива Citadel под ключом citadel:{name}.
+
+        Args:
+            name: Имя без префикса ('alerts', 'book:BTC/USDT:USDT', ...).
+            data: JSON-сериализуемое значение.
+            ttl_sec: Время жизни в секундах (None или 0 — без истечения).
+        """
+        kwargs: dict[str, Any] = {}
+        if ttl_sec:
+            kwargs["ex"] = int(ttl_sec)
+        await self._client.set(
+            _key("citadel", name), json.dumps(data), **kwargs
+        )
+
+    async def get_citadel(self, name: str) -> Any:
+        """Читает данные архива Citadel.
+
+        Args:
+            name: Имя без префикса 'citadel:'.
+
+        Returns:
+            Значение или None, если ключа нет (истёк или ещё не записан).
+        """
+        raw = await self._client.get(_key("citadel", name))
         return json.loads(raw) if raw else None
 
     # ---------------------------------------------------------------- pipeline

@@ -18,6 +18,9 @@ Bybit WS/REST ──► collectors ──► TimescaleDB (история) + Redi
                                      │
                                      ▼
                   run_strategy (сигналы в БД, трекинг позиций)
+
+Citadel REST ──► CitadelCollector ──► shadow_signals + Redis `citadel:*`
+(сторонний терминал: только запись для анализа, без позиций и Telegram)
 ```
 
 **Сетапы:**
@@ -65,12 +68,14 @@ python -m pytest tests -q           # unit-тесты
 | `config/symbols.yaml` | Список пар, таймфреймы, глубина истории |
 | `config/strategy_params.yaml` | Фильтры, параметры сетапов, риск |
 | `config/database.yaml` | Подключение к TimescaleDB/Redis (секреты — в `.env`) |
+| `config/citadel.yaml` | Сторонний терминал Citadel: интервалы опроса, виды событий |
 
 ## Данные
 
 - **TimescaleDB**: `ohlcv` (hypertable, 7-дневные чанки), `funding_data`,
-  `signals`, `positions`
-- **Redis** (TTL): текущие свечи 5 мин, стакан 10 сек, CVD 15 мин, funding 1 час
+  `signals`, `positions`, `shadow_signals` (теневые сигналы Citadel)
+- **Redis** (TTL): текущие свечи 5 мин, стакан 10 сек, CVD 15 мин, funding 1 час,
+  данные Citadel `citadel:*` (стакан 2 мин, каскады/ловушки 6 ч, состояние 15 мин)
 - **WS-потоки**: `kline.1m`, `publicTrade` (CVD), `orderbook.50` на каждый символ
 
 ## Индикаторы
@@ -93,6 +98,29 @@ VWAP, EMA 20/50/200): pandas-ta не поддерживается, ta-lib тре
 - Только публичные API — ключи не нужны
 - Секреты в `.env` (в git не попадает, есть `.env.example`)
 - API-ключи никогда не логируются
+
+## Citadel (теневые сигналы)
+
+`CitadelCollector` запускается вместе с `run_collector` и читает открытый архив
+стороннего терминала [cryptoangel.trade](https://cryptoangel.trade) (без ключей).
+Позиций не создаёт, символы не блокирует, в Telegram ничего не шлёт — только
+записывает данные, чтобы измерить их на своей истории.
+
+| Лента архива | Что даёт | Куда пишет |
+|---|---|---|
+| `/api/alerts` | алерты «Тотал Анализ» (только BTC) | `shadow_signals`, Redis `citadel:alerts` |
+| `/api/trdr` | метки TRDR: DIAMOND, Double Diamond, ... (BTC) | `shadow_signals`, Redis `citadel:trdr` |
+| `/api/marks` | последний каскад или ловушка по монете | `shadow_signals`, Redis `citadel:mark:{symbol}:{tf}` |
+| `/api/ob_now` | агрегированный стакан ~15 бирж: глубина и стены | Redis `citadel:book:{symbol}` |
+
+- **Теневой сигнал** — событие с входом, лимиткой, стопом и целями, посчитанными
+  правилами бота на момент события. У замеченного с опозданием события цена
+  на момент события неизвестна — оно пишется без уровней и кандидатом не считается.
+- Citadel знает не все монеты бота: `citadel:status` показывает `covered` / `uncovered`.
+  Чего он не отдаёт, того нет в Redis; остальные данные монеты работают как раньше.
+- Отчёт: `python -m scripts.analyze_shadow [--days N] [--onset]` — replay той же
+  механики, что в `analyze_quality`, и сравнение события с «входом в случайную минуту».
+- Выключить: `enabled: false` в `config/citadel.yaml`.
 
 ## Что дальше
 
